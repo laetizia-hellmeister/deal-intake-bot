@@ -1,0 +1,25 @@
+name: Promote Inbound Deals to Pipeline
+
+on:
+  schedule:
+    # 17:00 Europe/Copenhagen = 15:00 UTC in summer (CEST), 16:00 UTC in winter (CET).
+    # Run at both; the script is idempotent and only acts during local 17:00.
+    - cron: '0 15 * * *'
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python scripts/promote.py
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
