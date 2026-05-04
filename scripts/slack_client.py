@@ -31,7 +31,13 @@ class SlackClient:
     def fetch_recent_messages(self, lookback_seconds: int, limit: int) -> list[dict]:
         """Return messages from the channel, newest first, within lookback window."""
         now = time.time()
-        oldest = now - lookback_seconds
+        # Slack's `oldest` expects a Unix timestamp formatted as
+        # <seconds>.<microseconds> (max 6 decimal places). Python's default
+        # float repr can emit 7 decimals, which Slack mis-parses (the
+        # decimal point shifts and we end up filtering on a date in 2532).
+        # Use an integer second — sub-second precision is irrelevant for a
+        # 1-hour window.
+        oldest = int(now - lookback_seconds)
         # --- DEBUG --------------------------------------------------------
         token = self._client.token or ""
         token_preview = (
