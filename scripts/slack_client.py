@@ -57,13 +57,15 @@ class SlackClient:
             f"error={resp.get('error')}"
         )
         if not msgs:
-            # Print the full response (minus huge fields) to understand why.
-            redacted = {
-                k: v
-                for k, v in dict(resp).items()
-                if k not in ("response_metadata",)
-            }
-            print(f"[DEBUG] full response: {redacted}")
+            # Print the raw response data dict to understand why.
+            try:
+                raw = getattr(resp, "data", None) or {}
+                redacted = {
+                    k: v for k, v in raw.items() if k != "response_metadata"
+                }
+                print(f"[DEBUG] full response: {redacted}")
+            except Exception as e:
+                print(f"[DEBUG] could not dump response: {e}")
             # Also try a no-oldest call to see if it's the time filter
             try:
                 probe = self._client.conversations_history(
@@ -73,10 +75,21 @@ class SlackClient:
                 print(
                     f"[DEBUG] probe (no oldest): ok={probe.get('ok')} "
                     f"messages={len(probe_msgs)} "
-                    f"first_ts={probe_msgs[0].get('ts') if probe_msgs else None}"
+                    f"first_ts={probe_msgs[0].get('ts') if probe_msgs else None} "
+                    f"first_text={(probe_msgs[0].get('text') if probe_msgs else '')[:80]!r}"
                 )
             except Exception as e:
                 print(f"[DEBUG] probe failed: {e}")
+            # Also probe auth.test to see which bot identity we are
+            try:
+                who = self._client.auth_test()
+                print(
+                    f"[DEBUG] auth.test: bot_id={who.get('bot_id')} "
+                    f"user_id={who.get('user_id')} team={who.get('team')} "
+                    f"team_id={who.get('team_id')}"
+                )
+            except Exception as e:
+                print(f"[DEBUG] auth.test failed: {e}")
         else:
             top = msgs[0]
             print(
