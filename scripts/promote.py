@@ -94,14 +94,32 @@ def _promote_one(attio: AttioClient, company_id: str, entry: dict) -> None:
 
 
 def _pipeline_entry_values(entry: dict) -> dict:
-    """Build entry_values for the Deal Pipeline.
+    """Build entry_values for the new Deal Pipeline entry.
 
-    Per spec: stage = "New" always. Pass through upcoming_round and
-    upcoming_round_size_eum if present on the inbound entry.
+    Set on every promotion:
+      stage = "New"
+    Carried over from the Inbound entry when present:
+      sourcer    (actor-reference, same shape on both lists)
+      deal_lead  (actor-reference, same shape on both lists)
+      upcoming_round / upcoming_round_size_eum (if Inbound had them —
+        currently not populated on Inbound but kept for future-proofing)
+    Not auto-carried (different attribute type on Pipeline):
+      source — text on Inbound, record-reference on Pipeline. Filled
+      manually after promote.
     """
     values: dict = {"stage": PIPELINE_STAGE_NEW}
 
     inbound_values = entry.get("entry_values") or {}
+
+    # Sourcer (actor-reference) — copy as-is.
+    sourcer_refs = _extract_actor_refs(inbound_values.get("sourcer"))
+    if sourcer_refs:
+        values["sourcer"] = sourcer_refs
+
+    # Deal Lead (actor-reference) — copy as-is, preserves order.
+    lead_refs = _extract_actor_refs(inbound_values.get("deal_lead"))
+    if lead_refs:
+        values["deal_lead"] = lead_refs
 
     # upcoming_round — only include valid in-scope values
     upcoming_round = _extract_select(inbound_values.get("upcoming_round"))
@@ -114,6 +132,40 @@ def _pipeline_entry_values(entry: dict) -> dict:
         values["upcoming_round_size_eum"] = size
 
     return values
+
+
+def _extract_actor_refs(v) -> list[dict]:
+    """Convert Attio actor-reference values from read shape to write shape.
+
+    Attio responses can return actor-references in a couple of shapes
+    depending on the surface:
+      [{"referenced_actor_type": "...", "referenced_actor_id": "..."}, ...]
+      [{"actor": {"type": "...", "id": "..."}}, ...]
+    We re-emit them in the write-shape Attio expects when creating the
+    Pipeline entry.
+    """
+    if not v:
+        return []
+    if not isinstance(v, list):
+        v = [v]
+    out: list[dict] = []
+    for item in v:
+        if not isinstance(item, dict):
+            continue
+        actor_id = item.get("referenced_actor_id")
+        actor_type = item.get("referenced_actor_type")
+        if not actor_id:
+            inner = item.get("actor") or {}
+            actor_type = inner.get("type")
+            actor_id = inner.get("id")
+        if actor_id:
+            out.append(
+                {
+                    "referenced_actor_type": actor_type or "workspace-member",
+                    "referenced_actor_id": actor_id,
+                }
+            )
+    return out
 
 
 def _mark_added(
