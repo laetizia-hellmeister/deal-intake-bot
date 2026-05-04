@@ -30,13 +30,62 @@ class SlackClient:
 
     def fetch_recent_messages(self, lookback_seconds: int, limit: int) -> list[dict]:
         """Return messages from the channel, newest first, within lookback window."""
-        oldest = time.time() - lookback_seconds
+        now = time.time()
+        oldest = now - lookback_seconds
+        # --- DEBUG --------------------------------------------------------
+        token = self._client.token or ""
+        token_preview = (
+            f"{token[:8]}...{token[-4:]} (len={len(token)})" if token else "EMPTY"
+        )
+        print(
+            f"[DEBUG] channel={self.channel_id} "
+            f"now={now} oldest={oldest} "
+            f"lookback_seconds={lookback_seconds} "
+            f"limit={limit} token={token_preview}"
+        )
+        # ------------------------------------------------------------------
         resp = self._client.conversations_history(
             channel=self.channel_id,
             oldest=str(oldest),
             limit=limit,
         )
-        return resp.get("messages", []) or []
+        msgs = resp.get("messages", []) or []
+        # --- DEBUG --------------------------------------------------------
+        print(
+            f"[DEBUG] Slack response: ok={resp.get('ok')} "
+            f"messages={len(msgs)} has_more={resp.get('has_more')} "
+            f"error={resp.get('error')}"
+        )
+        if not msgs:
+            # Print the full response (minus huge fields) to understand why.
+            redacted = {
+                k: v
+                for k, v in dict(resp).items()
+                if k not in ("response_metadata",)
+            }
+            print(f"[DEBUG] full response: {redacted}")
+            # Also try a no-oldest call to see if it's the time filter
+            try:
+                probe = self._client.conversations_history(
+                    channel=self.channel_id, limit=3
+                )
+                probe_msgs = probe.get("messages", []) or []
+                print(
+                    f"[DEBUG] probe (no oldest): ok={probe.get('ok')} "
+                    f"messages={len(probe_msgs)} "
+                    f"first_ts={probe_msgs[0].get('ts') if probe_msgs else None}"
+                )
+            except Exception as e:
+                print(f"[DEBUG] probe failed: {e}")
+        else:
+            top = msgs[0]
+            print(
+                f"[DEBUG] first msg ts={top.get('ts')} "
+                f"age_sec={now - float(top.get('ts', '0'))} "
+                f"text_preview={(top.get('text') or '')[:80]!r}"
+            )
+        # ------------------------------------------------------------------
+        return msgs
 
     # -- filtering ---------------------------------------------------------
 
