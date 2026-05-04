@@ -74,11 +74,18 @@ INGEST_MESSAGE_LIMIT = 50
 NAME_FUZZY_THRESHOLD = 85
 NAME_STOP_WORDS = {"the", "inc", "ltd", "gmbh", "ag", "sa", "llc", "co"}
 
-# --- Deal Lead mapping (Slack user_id -> Attio workspace_member_id) ---
-# When a deal is added to Inbound Deals, the Deal Lead attribute is set to
-# the Attio workspace member that matches the Slack poster. If the poster
-# isn't in this map, deal_lead is left empty and Attio will fall back to
-# its default (the API key owner — i.e. the bot identity).
+# --- Slack user -> Attio workspace member mapping ---
+# Used to populate the Sourcer and Deal Lead attributes on Inbound Deals
+# entries. Sourcer is always the Slack poster; Deal Lead is any
+# @-mentioned colleague(s) first, then the poster. Posters / mentions
+# not in this map are simply ignored.
 SLACK_USER_TO_ATTIO_MEMBER = {
     "U093USR1DDE": "c54f95b1-48af-4697-b965-60eac9bd1368",  # Laetizia Hellmeister
+    "U0ANFPTB41E": "e84ae462-af28-42fe-82fe-4373c8ea9858",  # Pranav Tadikonda
+    "U09HRG2EM43": "653d6276-e8ed-46dd-b15e-d82bece3f87a",  # Shrey Mittal
+    "U06UJCMF32S": "c9d19f01-8f8b-4697-89a1-c9a7765b3641",  # Matilda Glynn-Henley
+    "U086NAN4ZLN": "5e0f7ea0-8e1d-4263-a2e4-7a92c9de9d6b",  # Rockman Law
+    "U1K6Y4U59":   "a81dd787-7863-4946-affb-a1ca9b708eb6",  # Adrian Locher
+    "U1K8DJ4MD":   "4c651318-ffd6-4fd1-b1fe-8cd6ebb7db20",  # Rasmus Rothe
+    "U0AT4FU0U8P": "a7c78bf9-ef9e-4a16-94dc-e446af0aca5e",  # Nicole Büttner
 }

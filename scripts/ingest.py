@@ -17,6 +17,7 @@ deal as a bulleted line; the reaction reflects the best outcome:
 
 from __future__ import annotations
 
+import re
 import sys
 import traceback
 from typing import Any
@@ -113,8 +114,23 @@ def _process_message(
 
         permalink = slack.permalink(ts) or ""
         slack_user = msg.get("user")
-        attio_member = SLACK_USER_TO_ATTIO_MEMBER.get(slack_user)
+        poster_member = SLACK_USER_TO_ATTIO_MEMBER.get(slack_user)
         fallback_source = _fallback_source(slack, msg)
+
+        # Sourcer = always the Slack poster (single value).
+        sourcer_member = poster_member
+
+        # Deal Lead = any @-mentioned colleague(s) first, then the poster.
+        # Deduplicated, preserving order, using the same Slack→Attio map.
+        mentioned_members = [
+            SLACK_USER_TO_ATTIO_MEMBER[uid]
+            for uid in _extract_slack_mentions(text)
+            if uid in SLACK_USER_TO_ATTIO_MEMBER
+        ]
+        lead_members: list[str] = []
+        for m in mentioned_members + ([poster_member] if poster_member else []):
+            if m and m not in lead_members:
+                lead_members.append(m)
 
         # Process each deal independently; collect a per-deal outcome line.
         outcomes: list[dict[str, Any]] = []
@@ -124,7 +140,8 @@ def _process_message(
                     attio=attio,
                     deal=deal,
                     permalink=permalink,
-                    attio_member=attio_member,
+                    sourcer_member=sourcer_member,
+                    lead_members=lead_members,
                     fallback_source=fallback_source,
                 )
             )
@@ -154,12 +171,34 @@ def _process_message(
             pass
 
 
+_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
+
+
+def _extract_slack_mentions(text: str) -> list[str]:
+    """Return Slack user IDs mentioned in a message, in order, deduplicated.
+
+    Slack renders @-mentions in message text as `<@U123ABC>` or
+    `<@U123ABC|name>`. User IDs start with U (humans) or W (enterprise
+    grid). We don't try to fetch display names — just IDs.
+    """
+    if not text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for uid in _MENTION_RE.findall(text):
+        if uid not in seen:
+            out.append(uid)
+            seen.add(uid)
+    return out
+
+
 def _process_one_deal(
     *,
     attio: AttioClient,
     deal: dict[str, Any],
     permalink: str,
-    attio_member: str | None,
+    sourcer_member: str | None,
+    lead_members: list[str],
     fallback_source: str | None,
 ) -> dict[str, Any]:
     """Process a single deal extracted from a Slack message.
@@ -204,7 +243,8 @@ def _process_one_deal(
                 step=STEP_DUPLICATE,
                 source=source,
                 description=dup_description,
-                attio_member=attio_member,
+                sourcer_member=sourcer_member,
+                lead_members=lead_members,
             )
             attio.add_record_to_list(
                 list_id=INBOUND_DEALS_LIST_ID,
@@ -232,7 +272,8 @@ def _process_one_deal(
             step=STEP_NEW,
             source=source,
             description=description,
-            attio_member=attio_member,
+            sourcer_member=sourcer_member,
+            lead_members=lead_members,
         )
 
         attio.add_record_to_list(
@@ -397,22 +438,38 @@ def _build_inbound_entry_values(
     step: str,
     source: str | None,
     description: str | None,
-    attio_member: str | None,
+    sourcer_member: str | None,
+    lead_members: list[str],
 ) -> dict[str, Any]:
     """Build the entry_values payload for an Inbound Deals entry, dropping
     any keys whose value is None/empty. Attio rejects explicit nulls on
-    text attributes with a 400 validation_type error."""
+    text attributes with a 400 validation_type error.
+
+    sourcer_member: single Attio workspace_member_id of the Slack poster
+                    (always — they sourced the deal into the channel).
+    lead_members:   list of Attio workspace_member_ids — any @-mentioned
+                    colleagues first, then the poster. Empty if nobody
+                    is mappable.
+    """
     values: dict[str, Any] = {"step": step}
     if source:
         values["source"] = source
     if description:
         values["description"] = description
-    if attio_member:
+    if sourcer_member:
+        values["sourcer"] = [
+            {
+                "referenced_actor_type": "workspace-member",
+                "referenced_actor_id": sourcer_member,
+            }
+        ]
+    if lead_members:
         values["deal_lead"] = [
             {
                 "referenced_actor_type": "workspace-member",
-                "referenced_actor_id": attio_member,
+                "referenced_actor_id": m,
             }
+            for m in lead_members
         ]
     return values
 
