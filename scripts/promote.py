@@ -93,7 +93,12 @@ def main() -> int:
         _mark_added(attio, entry_id, failed, company_name)
         promoted.append(company_name)
 
-    open_breakdown = _open_breakdown(attio)
+    # The per-person breakdown of open deals (with @-mentions) is meant
+    # as a once-a-day reminder — only included on the evening run. The
+    # noon run posts only what it actually moved (no nag in the middle
+    # of the day). Manual runs include the breakdown so testing works.
+    include_breakdown = is_manual or _in_evening_window(now_local)
+    open_breakdown = _open_breakdown(attio) if include_breakdown else None
     _post_summary(slack, promoted, failed, open_breakdown)
     attio.close()
     return 0
@@ -139,9 +144,21 @@ def _in_target_window(now_local: datetime) -> bool:
     GitHub Actions cron is best-effort and can drift 5-15 min under load.
     """
     minutes = now_local.hour * 60 + now_local.minute
-    noon_window = (12 * 60) <= minutes < (13 * 60)
-    evening_window = (17 * 60 + 30) <= minutes < (18 * 60 + 30)
-    return noon_window or evening_window
+    return _in_noon_window_minutes(minutes) or _in_evening_window_minutes(minutes)
+
+
+def _in_evening_window(now_local: datetime) -> bool:
+    """True if the current local time is in the 17:30 promote window."""
+    minutes = now_local.hour * 60 + now_local.minute
+    return _in_evening_window_minutes(minutes)
+
+
+def _in_noon_window_minutes(minutes: int) -> bool:
+    return (12 * 60) <= minutes < (13 * 60)
+
+
+def _in_evening_window_minutes(minutes: int) -> bool:
+    return (17 * 60 + 30) <= minutes < (18 * 60 + 30)
 
 
 def _promote_one(attio: AttioClient, company_id: str, entry: dict) -> None:
