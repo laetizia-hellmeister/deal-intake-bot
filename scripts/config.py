@@ -44,8 +44,14 @@ DEAL_PIPELINE_LIST_SLUG = "vc_deal_flow_4"
 PARENT_OBJECT = "companies"
 
 # --- Stage / scope ---
+# In scope by intent: Angel / Pre-seed / Seed.
+# A deal is only marked OUT of scope when the stage is *explicitly* Series A
+# or later. Missing / "Unknown" stages are treated as in-scope (working
+# assumption: if a stage isn't stated, the deal is most likely an early
+# round). The deal is added to Inbound Deals with stage left blank.
 IN_SCOPE_STAGES = {"Angel", "Pre-seed", "Seed"}
-ALL_STAGES = {"Angel", "Pre-seed", "Seed", "Series A", "Series B", "Series C"}
+OUT_OF_SCOPE_STAGES = {"Series A", "Series B", "Series C"}
+ALL_STAGES = IN_SCOPE_STAGES | OUT_OF_SCOPE_STAGES
 
 # Step values on Inbound Deals entries
 STEP_NEW = "New"

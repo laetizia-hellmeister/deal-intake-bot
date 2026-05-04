@@ -29,7 +29,7 @@ from config import (
     INBOUND_DEALS_LIST_ID,
     INGEST_LOOKBACK_SECONDS,
     INGEST_MESSAGE_LIMIT,
-    IN_SCOPE_STAGES,
+    OUT_OF_SCOPE_STAGES,
     PARENT_OBJECT,
     PIPELINE_STAGE_NEW,
     REACTION_ADDED,
@@ -173,13 +173,16 @@ def _process_one_deal(
 
     company_name = deal.get("company_name") or "unknown company"
     stage = deal.get("stage")
+    # Treat "Unknown" and missing as the same — both pass the scope check.
+    stage_for_scope = stage if stage and stage != "Unknown" else None
 
     try:
-        # Out of scope
-        if stage not in IN_SCOPE_STAGES:
+        # Out of scope only when the stage is *explicitly* Series A or later.
+        # Missing / unknown stages are added with stage left blank.
+        if stage_for_scope in OUT_OF_SCOPE_STAGES:
             line = (
                 f"⏭️ {company_name} — out of scope "
-                f"(stage: {stage or 'unknown'})"
+                f"(stage: {stage_for_scope})"
             )
             return {"outcome": "out_of_scope", "line": line}
 
@@ -226,9 +229,10 @@ def _process_one_deal(
         round_size = deal.get("round_size_eur_m")
         round_str = f"€{round_size}M" if round_size else "€?"
         sector = deal.get("sector") or "?"
+        stage_label = stage_for_scope or "stage ?"
         attio_url = AttioClient.company_web_url(company_id)
         line = (
-            f"✅ {company_name} · {stage} · {round_str} · {sector} "
+            f"✅ {company_name} · {stage_label} · {round_str} · {sector} "
             f"({attio_url})"
         )
         return {"outcome": "added", "line": line}
@@ -315,9 +319,11 @@ def _build_inbound_description(deal: dict[str, Any], permalink: str) -> str:
         bits.append("Founder LinkedIns: " + ", ".join(founder_linkedins))
     if sector:
         bits.append(f"Sector: {sector}")
-    if stage:
+    if stage and stage != "Unknown":
         round_str = f" (€{round_size}M)" if round_size else ""
         bits.append(f"Round: {stage}{round_str}")
+    elif round_size:
+        bits.append(f"Round: €{round_size}M")
     if permalink:
         bits.append(f"Slack: {permalink}")
 
