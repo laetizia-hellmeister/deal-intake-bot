@@ -89,3 +89,9 @@ SLACK_USER_TO_ATTIO_MEMBER = {
     "U1K8DJ4MD":   "4c651318-ffd6-4fd1-b1fe-8cd6ebb7db20",  # Rasmus Rothe
     "U0AT4FU0U8P": "a7c78bf9-ef9e-4a16-94dc-e446af0aca5e",  # Nicole Büttner
 }
+
+# Inverse lookup — used by the daily digest to @-tag the deal lead in Slack.
+ATTIO_MEMBER_TO_SLACK_USER = {
+    member_id: slack_id
+    for slack_id, member_id in SLACK_USER_TO_ATTIO_MEMBER.items()
+}

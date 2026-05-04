@@ -1,0 +1,26 @@
+name: Daily digest of new Inbound Deals
+
+on:
+  schedule:
+    # 09:00 Europe/Copenhagen = 07:00 UTC (summer CEST), 08:00 UTC (winter CET).
+    # Both fire Mon-Fri; the script gates on local hour == 9 and exits on the
+    # one that doesn't map to 09:00 local.
+    - cron: '0 7 * * 1-5'
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python scripts/digest.py
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
