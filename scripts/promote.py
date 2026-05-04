@@ -93,13 +93,19 @@ def main() -> int:
         _mark_added(attio, entry_id, failed, company_name)
         promoted.append(company_name)
 
-    # The per-person breakdown of open deals (with @-mentions) is meant
-    # as a once-a-day reminder — only included on the evening run. The
-    # noon run posts only what it actually moved (no nag in the middle
-    # of the day). Manual runs include the breakdown so testing works.
-    include_breakdown = is_manual or _in_evening_window(now_local)
-    open_breakdown = _open_breakdown(attio) if include_breakdown else None
-    _post_summary(slack, promoted, failed, open_breakdown)
+    # Slack-posting policy:
+    #  - Evening run (17:30) and manual runs: full digest with open
+    #    breakdown + @-mentions. This is the daily "queue check-in".
+    #  - Noon run: silent unless something failed. Promotions still
+    #    happen — the deals just appear in Deal Pipeline without a
+    #    Slack post until the evening digest counts them in the queue.
+    is_evening_or_manual = is_manual or _in_evening_window(now_local)
+    if is_evening_or_manual:
+        open_breakdown = _open_breakdown(attio)
+        _post_summary(slack, promoted, failed, open_breakdown)
+    elif failed:
+        # Noon run with errors — surface them so they don't get lost.
+        _post_summary(slack, [], failed, None)
     attio.close()
     return 0
 
