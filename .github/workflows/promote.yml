@@ -2,10 +2,15 @@ name: Promote Inbound Deals to Pipeline
 
 on:
   schedule:
-    # 17:00 Europe/Copenhagen = 15:00 UTC in summer (CEST), 16:00 UTC in winter (CET).
-    # Run at both; the script is idempotent and only acts during local 17:00.
-    - cron: '0 15 * * *'
-    - cron: '0 16 * * *'
+    # Twice daily: 12:00 + 17:30 Europe/Copenhagen.
+    # GitHub cron is UTC only, so each local target needs both a CEST
+    # (UTC+2, summer) and a CET (UTC+1, winter) entry. The script gates
+    # on local hour and exits silently on the schedules that didn't map
+    # to a target window for the current DST state.
+    - cron: '0 10 * * *'   # 12:00 CEST
+    - cron: '0 11 * * *'   # 12:00 CET
+    - cron: '30 15 * * *'  # 17:30 CEST
+    - cron: '30 16 * * *'  # 17:30 CET
   workflow_dispatch:
 
 jobs:

@@ -1,6 +1,7 @@
 """Promote workflow entry point.
 
-Runs daily at 17:00 Europe/Copenhagen (gated in-script to handle DST).
+Runs twice daily — 12:00 + 17:30 Europe/Copenhagen — gated in-script to
+handle DST and to allow manual workflow_dispatch runs at any time.
 Moves Inbound Deals entries whose Step == "Add to pipeline" into the main
 Deal Pipeline, then flips the Inbound Step to "Added".
 
@@ -10,6 +11,7 @@ The only Deal Pipeline endpoint used here is add-record-to-list.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from datetime import datetime
@@ -32,11 +34,18 @@ from slack_client import SlackClient
 
 
 def main() -> int:
-    # DST gate: GitHub cron is UTC only; we schedule twice and exit silently
-    # on the run that isn't local 17:00 Copenhagen.
+    # Manual runs (workflow_dispatch) always do work — they're the
+    # "test now" / "promote now" button. Cron-triggered runs go through
+    # the time gate so only the schedules that map to a target window
+    # for the current DST state actually run.
+    is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     now_local = datetime.now(ZoneInfo("Europe/Copenhagen"))
-    if now_local.hour != 17:
-        print(f"Skipping — local hour is {now_local.hour}, not 17")
+
+    if not is_manual and not _in_target_window(now_local):
+        print(
+            f"Skipping — local time is {now_local.strftime('%H:%M')}, "
+            "not within 12:00-12:59 or 17:30-18:29 window"
+        )
         return 0
 
     attio = AttioClient()
@@ -84,6 +93,20 @@ def main() -> int:
     _post_summary(slack, promoted, failed)
     attio.close()
     return 0
+
+
+def _in_target_window(now_local: datetime) -> bool:
+    """True if the current local time is in either of the promote windows.
+
+    Two daily windows:
+      noon:    12:00-12:59 (cron fires at 12:00, allow up to 1h drift)
+      evening: 17:30-18:29 (cron fires at 17:30, allow up to 1h drift)
+    GitHub Actions cron is best-effort and can drift 5-15 min under load.
+    """
+    minutes = now_local.hour * 60 + now_local.minute
+    noon_window = (12 * 60) <= minutes < (13 * 60)
+    evening_window = (17 * 60 + 30) <= minutes < (18 * 60 + 30)
+    return noon_window or evening_window
 
 
 def _promote_one(attio: AttioClient, company_id: str, entry: dict) -> None:
