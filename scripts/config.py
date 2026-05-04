@@ -63,6 +63,28 @@ STEP_DUPLICATE = "Duplicate"
 # Deal Pipeline stage on creation
 PIPELINE_STAGE_NEW = "New"
 
+# Valid `sourcing_channel` select options on Deal Pipeline. The LLM picks
+# one when the message makes the channel clear; promote.py maps the picked
+# value (case-insensitive) to one of these. Anything else is dropped.
+PIPELINE_SOURCING_CHANNELS = (
+    "Ecosystem / AI Campus",
+    "VC",
+    "Angel",
+    "Personal Network",
+    "Conference / Event",
+    "LinkedIn",
+    "Cold Email (Inbound)",
+    "Database (Specter, Dealroom)",
+    "Demo Day",
+    "Sector Research",
+    "Accelerator / Incubator",
+    "University",
+    "Founder Network",
+    "Portfolio Founder",
+    "Advisory / Broker Firm",
+    "Active Sourcing",
+)
+
 # --- LLM ---
 CLAUDE_MODEL = "claude-opus-4-7"
 

@@ -235,7 +235,7 @@ def _process_one_deal(
         if match:
             attio_url = AttioClient.company_web_url(match.company_id or "")
             existing_loc = location_label(match)
-            source = deal.get("source") or fallback_source
+            source = _format_source(deal, fallback_source)
             dup_description = _build_duplicate_description(
                 deal, permalink, attio_url, existing_loc
             )
@@ -265,7 +265,7 @@ def _process_one_deal(
         if not company_id:
             raise RuntimeError("Attio did not return a company record id")
 
-        source = deal.get("source") or fallback_source
+        source = _format_source(deal, fallback_source)
         description = _build_inbound_description(deal, permalink)
 
         entry_values = _build_inbound_entry_values(
@@ -431,6 +431,27 @@ def _lookup_person(
             best = c
             best_score = score
     return best
+
+
+def _format_source(deal: dict[str, Any], fallback: str | None) -> str | None:
+    """Build the Inbound Deals `source` text.
+
+    Combines the LLM's source string (or the Slack-poster fallback) with
+    the detected sourcing_channel suffix in parens, e.g.:
+        "Hillary from TestCo VC (VC)"
+        "shared by Tom Smith (Angel)"
+    Promote.py parses the trailing parens back out at promotion time
+    to set Pipeline's sourcing_channel select attribute.
+    """
+    body = deal.get("source") or fallback
+    channel = deal.get("sourcing_channel")
+    if body and channel:
+        return f"{body} ({channel})"
+    if body:
+        return body
+    if channel:
+        return f"({channel})"
+    return None
 
 
 def _build_inbound_entry_values(

@@ -10,16 +10,21 @@ The only Deal Pipeline endpoint used here is add-record-to-list.
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from rapidfuzz import fuzz
 
 from attio_client import AttioClient, AttioError
 from config import (
     DEAL_PIPELINE_LIST_ID,
     INBOUND_DEALS_LIST_ID,
     IN_SCOPE_STAGES,
+    NAME_FUZZY_THRESHOLD,
     PARENT_OBJECT,
+    PIPELINE_SOURCING_CHANNELS,
     PIPELINE_STAGE_NEW,
     STEP_ADDED,
 )
@@ -83,7 +88,7 @@ def main() -> int:
 
 def _promote_one(attio: AttioClient, company_id: str, entry: dict) -> None:
     """Add the company to Deal Pipeline. Only non-list-mutating call here."""
-    entry_values = _pipeline_entry_values(entry)
+    entry_values = _pipeline_entry_values(entry, attio)
     attio.add_record_to_list(
         list_id=DEAL_PIPELINE_LIST_ID,
         parent_record_id=company_id,
@@ -93,7 +98,7 @@ def _promote_one(attio: AttioClient, company_id: str, entry: dict) -> None:
     )
 
 
-def _pipeline_entry_values(entry: dict) -> dict:
+def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
     """Build entry_values for the new Deal Pipeline entry.
 
     Set on every promotion:
@@ -101,11 +106,13 @@ def _pipeline_entry_values(entry: dict) -> dict:
     Carried over from the Inbound entry when present:
       sourcer    (actor-reference, same shape on both lists)
       deal_lead  (actor-reference, same shape on both lists)
-      upcoming_round / upcoming_round_size_eum (if Inbound had them —
-        currently not populated on Inbound but kept for future-proofing)
-    Not auto-carried (different attribute type on Pipeline):
-      source — text on Inbound, record-reference on Pipeline. Filled
-      manually after promote.
+      sourcing_channel (parsed from the Inbound source text suffix
+        "(<channel>)", validated against PIPELINE_SOURCING_CHANNELS)
+      source     (record-reference on Pipeline) — looked up from the
+        Inbound source text body via fuzzy match against People then
+        Companies. Skipped if no high-confidence match.
+      upcoming_round / upcoming_round_size_eum — kept for completeness,
+        not currently populated on Inbound.
     """
     values: dict = {"stage": PIPELINE_STAGE_NEW}
 
@@ -121,6 +128,16 @@ def _pipeline_entry_values(entry: dict) -> dict:
     if lead_refs:
         values["deal_lead"] = lead_refs
 
+    # Source text -> sourcing_channel + source record references.
+    source_text = _extract_text(inbound_values.get("source"))
+    body, channel = _parse_source_text(source_text)
+    if channel and channel in PIPELINE_SOURCING_CHANNELS:
+        values["sourcing_channel"] = [channel]
+    if body:
+        source_refs = _match_source_records(attio, body)
+        if source_refs:
+            values["source"] = source_refs
+
     # upcoming_round — only include valid in-scope values
     upcoming_round = _extract_select(inbound_values.get("upcoming_round"))
     if upcoming_round and upcoming_round in IN_SCOPE_STAGES:
@@ -132,6 +149,141 @@ def _pipeline_entry_values(entry: dict) -> dict:
         values["upcoming_round_size_eum"] = size
 
     return values
+
+
+_SOURCE_CHANNEL_SUFFIX_RE = re.compile(r"^(.*?)\s*\(([^()]+)\)\s*$")
+_SOURCE_FROM_SPLIT_RE = re.compile(r"\s+from\s+", re.IGNORECASE)
+
+
+def _parse_source_text(text: str | None) -> tuple[str | None, str | None]:
+    """Split an Inbound source text into (body, channel).
+
+    Examples:
+      "Hillary from TestCo VC (VC)" -> ("Hillary from TestCo VC", "VC")
+      "Tom Smith (Angel)"           -> ("Tom Smith", "Angel")
+      "(VC)"                        -> (None, "VC")
+      "Just a name"                 -> ("Just a name", None)
+    """
+    if not text:
+        return None, None
+    text = text.strip()
+    m = _SOURCE_CHANNEL_SUFFIX_RE.match(text)
+    if m:
+        body = m.group(1).strip() or None
+        channel = m.group(2).strip() or None
+        return body, channel
+    return text, None
+
+
+def _match_source_records(
+    attio: AttioClient, body: str
+) -> list[dict]:
+    """Look up Attio People / Companies that match the source body.
+
+    Strategy:
+      1. If the text has "X from Y", look up X in People and Y in Companies.
+      2. Else, try to match the whole text against People (more common to be
+         a person name) and then against Companies as a fallback.
+
+    Returns a list of record references in Pipeline's write shape:
+      [{"target_object": "people"|"companies", "target_record_id": "..."}]
+    Empty list if nothing matched well enough.
+    """
+    refs: list[dict] = []
+    parts = _SOURCE_FROM_SPLIT_RE.split(body, maxsplit=1)
+    if len(parts) == 2:
+        person_part = parts[0].strip()
+        firm_part = parts[1].strip()
+        person = _lookup_person_by_name(attio, person_part)
+        if person:
+            refs.append({"target_object": "people", "target_record_id": person})
+        company = _lookup_company_by_name(attio, firm_part)
+        if company:
+            refs.append({"target_object": "companies", "target_record_id": company})
+        return refs
+
+    # Single segment — try person first, then company.
+    person = _lookup_person_by_name(attio, body)
+    if person:
+        refs.append({"target_object": "people", "target_record_id": person})
+        return refs
+    company = _lookup_company_by_name(attio, body)
+    if company:
+        refs.append({"target_object": "companies", "target_record_id": company})
+    return refs
+
+
+def _lookup_person_by_name(attio: AttioClient, name: str) -> str | None:
+    """Fuzzy-match a Person record by name; return record_id of best match."""
+    name = name.strip()
+    if len(name) < 2:
+        return None
+    token = _first_token(name)
+    if not token:
+        return None
+    try:
+        candidates = attio.find_people_by_name_contains(token, limit=20)
+    except Exception:
+        return None
+    best_id = None
+    best_score = 0
+    for c in candidates:
+        cand = AttioClient.person_name(c)
+        if not cand:
+            continue
+        score = fuzz.ratio(name.lower(), cand.lower())
+        if score >= NAME_FUZZY_THRESHOLD and score > best_score:
+            best_id = (c.get("id") or {}).get("record_id")
+            best_score = score
+    return best_id
+
+
+def _lookup_company_by_name(attio: AttioClient, name: str) -> str | None:
+    """Fuzzy-match a Company record by name; return record_id of best match."""
+    name = name.strip()
+    if len(name) < 2:
+        return None
+    token = _first_token(name)
+    if not token:
+        return None
+    try:
+        candidates = attio.find_companies_by_name_contains(token, limit=50)
+    except Exception:
+        return None
+    best_id = None
+    best_score = 0
+    for c in candidates:
+        cand = AttioClient.company_name(c)
+        if not cand:
+            continue
+        score = fuzz.ratio(name.lower(), cand.lower())
+        if score >= NAME_FUZZY_THRESHOLD and score > best_score:
+            best_id = (c.get("id") or {}).get("record_id")
+            best_score = score
+    return best_id
+
+
+def _first_token(s: str) -> str | None:
+    """Return the first alphanumeric token from a string (used for the
+    Attio $contains prefilter)."""
+    for raw in re.split(r"[\s,\.]+", s.strip()):
+        token = re.sub(r"[^A-Za-z0-9]", "", raw)
+        if token:
+            return token
+    return None
+
+
+def _extract_text(v) -> str | None:
+    """Extract a plain-text value from Attio's read shape."""
+    if not v:
+        return None
+    if isinstance(v, str):
+        return v.strip() or None
+    if isinstance(v, list) and v:
+        return _extract_text(v[0])
+    if isinstance(v, dict):
+        return v.get("value") or None
+    return None
 
 
 def _extract_actor_refs(v) -> list[dict]:

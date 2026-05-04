@@ -28,7 +28,8 @@ Schema:
       "round_size_eur_m": number | null,
       "sector": string | null,
       "description": string | null,
-      "source": string | null
+      "source": string | null,
+      "sourcing_channel": string | null
     }
   ]
 }
@@ -50,9 +51,26 @@ Rules:
   "seed round" / "seed stage" -> "Seed"
   "series a" -> "Series A"
 - domain = root domain only (strip protocol, www., path, query).
-- source = who shared this deal, e.g. "John from Atomico". If the source is
-  stated once at the top of a multi-deal message, copy it onto each deal.
-  null if not stated.
+- source = who shared this deal, e.g. "Hillary from TestCo VC", "shared by
+  Tom Smith". If the source is stated once at the top of a multi-deal
+  message, copy it onto each deal. null if not stated.
+- sourcing_channel = the channel this deal came in through. Pick one of:
+  "VC", "Angel", "Personal Network", "Demo Day", "Conference / Event",
+  "LinkedIn", "Cold Email (Inbound)", "Database (Specter, Dealroom)",
+  "Sector Research", "Accelerator / Incubator", "University",
+  "Founder Network", "Portfolio Founder", "Advisory / Broker Firm",
+  "Ecosystem / AI Campus", "Active Sourcing".
+  Examples:
+    "Hillary from TestCo VC" -> "VC"
+    "Tom Smith, an angel investor" / "this angel shared" -> "Angel"
+    "my friend John mentioned" / "via personal contact" -> "Personal Network"
+    "saw at the AI Demo Day" / "from XYZ demo day" -> "Demo Day"
+    "from a LinkedIn DM" / "via LinkedIn" -> "LinkedIn"
+    "cold email from..." / "inbound from..." -> "Cold Email (Inbound)"
+    "from the AI Campus ecosystem" -> "Ecosystem / AI Campus"
+    "via [accelerator/incubator name]" -> "Accelerator / Incubator"
+    "introduced by founder of [portfolio company]" -> "Portfolio Founder"
+  Use null when the channel isn't clear from the message.
 - Return only the JSON object, nothing else.
 """
 
@@ -140,8 +158,29 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         "sector": _clean_str(data.get("sector")),
         "description": _clean_str(data.get("description")),
         "source": _clean_str(data.get("source")),
+        "sourcing_channel": _normalize_sourcing_channel(
+            data.get("sourcing_channel")
+        ),
     }
     return out
+
+
+def _normalize_sourcing_channel(v: Any) -> str | None:
+    """Map the LLM's channel string to the exact spelling Pipeline expects.
+    Returns None if the value doesn't match a known option."""
+    from config import PIPELINE_SOURCING_CHANNELS  # local import: avoid cycle
+    s = _clean_str(v)
+    if not s:
+        return None
+    # Exact match.
+    if s in PIPELINE_SOURCING_CHANNELS:
+        return s
+    # Case-insensitive match.
+    lower = s.lower()
+    for opt in PIPELINE_SOURCING_CHANNELS:
+        if opt.lower() == lower:
+            return opt
+    return None
 
 
 def _clean_str(v: Any) -> str | None:
