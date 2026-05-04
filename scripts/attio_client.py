@@ -5,6 +5,7 @@ Only the endpoints the bot actually needs are implemented.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Iterable
 
 import httpx
@@ -16,6 +17,13 @@ from config import (
     INBOUND_DEALS_LIST_ID,
     PARENT_OBJECT,
 )
+
+
+# HTTP statuses we retry once on, after a short pause. Attio occasionally
+# returns transient 401s (with a message like "API Key provided could not
+# be found") and the usual 5xx server-side hiccups. A single quick retry
+# keeps these from permanently dropping a deal.
+_RETRYABLE_STATUSES = {401, 429, 500, 502, 503, 504}
 
 
 class AttioError(Exception):
@@ -45,7 +53,15 @@ class AttioClient:
     # -- low-level ---------------------------------------------------------
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict:
+        # First attempt.
         r = self._client.request(method, path, **kwargs)
+        if r.status_code in _RETRYABLE_STATUSES:
+            # One brief retry — clears most transient Attio hiccups.
+            print(
+                f"[attio] {method} {path} -> {r.status_code}, retrying in 2s"
+            )
+            time.sleep(2.0)
+            r = self._client.request(method, path, **kwargs)
         if r.status_code >= 400:
             raise AttioError(
                 f"Attio {method} {path} -> {r.status_code}: {r.text}"
