@@ -66,3 +66,12 @@ INGEST_MESSAGE_LIMIT = 50
 # --- Dedupe ---
 NAME_FUZZY_THRESHOLD = 85
 NAME_STOP_WORDS = {"the", "inc", "ltd", "gmbh", "ag", "sa", "llc", "co"}
+
+# --- Deal Lead mapping (Slack user_id -> Attio workspace_member_id) ---
+# When a deal is added to Inbound Deals, the Deal Lead attribute is set to
+# the Attio workspace member that matches the Slack poster. If the poster
+# isn't in this map, deal_lead is left empty and Attio will fall back to
+# its default (the API key owner — i.e. the bot identity).
+SLACK_USER_TO_ATTIO_MEMBER = {
+    "U093USR1DDE": "c54f95b1-48af-4697-b965-60eac9bd1368",  # Laetizia Hellmeister
+}

@@ -27,6 +27,7 @@ from config import (
     REACTION_ERROR,
     REACTION_NOT_DEAL,
     REACTION_SKIPPED,
+    SLACK_USER_TO_ATTIO_MEMBER,
     STEP_NEW,
 )
 from dedupe import find_duplicate, location_label
@@ -133,6 +134,20 @@ def _process_message(
             "description": description,
             "step": STEP_NEW,
         }
+
+        # Set Deal Lead to the Slack poster (mapped to an Attio member),
+        # if we know the mapping. Otherwise Attio defaults it to the API
+        # key owner (the bot).
+        slack_user = msg.get("user")
+        attio_member = SLACK_USER_TO_ATTIO_MEMBER.get(slack_user)
+        if attio_member:
+            entry_values["deal_lead"] = [
+                {
+                    "referenced_actor_type": "workspace-member",
+                    "referenced_actor_id": attio_member,
+                }
+            ]
+
         attio.add_record_to_list(
             list_id=INBOUND_DEALS_LIST_ID,
             parent_record_id=company_id,

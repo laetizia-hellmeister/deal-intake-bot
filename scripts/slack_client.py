@@ -30,81 +30,19 @@ class SlackClient:
 
     def fetch_recent_messages(self, lookback_seconds: int, limit: int) -> list[dict]:
         """Return messages from the channel, newest first, within lookback window."""
-        now = time.time()
         # Slack's `oldest` expects a Unix timestamp formatted as
         # <seconds>.<microseconds> (max 6 decimal places). Python's default
-        # float repr can emit 7 decimals, which Slack mis-parses (the
+        # str(time.time()) can emit 7 decimals, which Slack mis-parses (the
         # decimal point shifts and we end up filtering on a date in 2532).
-        # Use an integer second — sub-second precision is irrelevant for a
-        # 1-hour window.
-        oldest = int(now - lookback_seconds)
-        # --- DEBUG --------------------------------------------------------
-        token = self._client.token or ""
-        token_preview = (
-            f"{token[:8]}...{token[-4:]} (len={len(token)})" if token else "EMPTY"
-        )
-        print(
-            f"[DEBUG] channel={self.channel_id} "
-            f"now={now} oldest={oldest} "
-            f"lookback_seconds={lookback_seconds} "
-            f"limit={limit} token={token_preview}"
-        )
-        # ------------------------------------------------------------------
+        # Use an integer second — sub-second precision is irrelevant for
+        # an hour-scale lookback.
+        oldest = int(time.time() - lookback_seconds)
         resp = self._client.conversations_history(
             channel=self.channel_id,
             oldest=str(oldest),
             limit=limit,
         )
-        msgs = resp.get("messages", []) or []
-        # --- DEBUG --------------------------------------------------------
-        print(
-            f"[DEBUG] Slack response: ok={resp.get('ok')} "
-            f"messages={len(msgs)} has_more={resp.get('has_more')} "
-            f"error={resp.get('error')}"
-        )
-        if not msgs:
-            # Print the raw response data dict to understand why.
-            try:
-                raw = getattr(resp, "data", None) or {}
-                redacted = {
-                    k: v for k, v in raw.items() if k != "response_metadata"
-                }
-                print(f"[DEBUG] full response: {redacted}")
-            except Exception as e:
-                print(f"[DEBUG] could not dump response: {e}")
-            # Also try a no-oldest call to see if it's the time filter
-            try:
-                probe = self._client.conversations_history(
-                    channel=self.channel_id, limit=3
-                )
-                probe_msgs = probe.get("messages", []) or []
-                print(
-                    f"[DEBUG] probe (no oldest): ok={probe.get('ok')} "
-                    f"messages={len(probe_msgs)} "
-                    f"first_ts={probe_msgs[0].get('ts') if probe_msgs else None} "
-                    f"first_text={(probe_msgs[0].get('text') if probe_msgs else '')[:80]!r}"
-                )
-            except Exception as e:
-                print(f"[DEBUG] probe failed: {e}")
-            # Also probe auth.test to see which bot identity we are
-            try:
-                who = self._client.auth_test()
-                print(
-                    f"[DEBUG] auth.test: bot_id={who.get('bot_id')} "
-                    f"user_id={who.get('user_id')} team={who.get('team')} "
-                    f"team_id={who.get('team_id')}"
-                )
-            except Exception as e:
-                print(f"[DEBUG] auth.test failed: {e}")
-        else:
-            top = msgs[0]
-            print(
-                f"[DEBUG] first msg ts={top.get('ts')} "
-                f"age_sec={now - float(top.get('ts', '0'))} "
-                f"text_preview={(top.get('text') or '')[:80]!r}"
-            )
-        # ------------------------------------------------------------------
-        return msgs
+        return resp.get("messages", []) or []
 
     # -- filtering ---------------------------------------------------------
 
