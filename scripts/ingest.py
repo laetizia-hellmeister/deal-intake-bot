@@ -29,6 +29,7 @@ from config import (
     INBOUND_DEALS_LIST_ID,
     INGEST_LOOKBACK_SECONDS,
     INGEST_MESSAGE_LIMIT,
+    NAME_FUZZY_THRESHOLD,
     OUT_OF_SCOPE_STAGES,
     PARENT_OBJECT,
     PIPELINE_STAGE_NEW,
@@ -38,10 +39,12 @@ from config import (
     REACTION_NOT_DEAL,
     REACTION_SKIPPED,
     SLACK_USER_TO_ATTIO_MEMBER,
+    STEP_DUPLICATE,
     STEP_NEW,
 )
-from dedupe import find_duplicate, location_label
+from dedupe import find_duplicate, location_label, _first_significant_token
 from extractor import extract_deals
+from rapidfuzz import fuzz
 from slack_client import SlackClient
 
 
@@ -186,13 +189,33 @@ def _process_one_deal(
             )
             return {"outcome": "out_of_scope", "line": line}
 
-        # Dedupe
+        # Dedupe — if the company already exists, still record this share
+        # in Inbound Deals as a Duplicate entry so we can count repeat
+        # shares.
         match = find_duplicate(attio, deal)
         if match:
             attio_url = AttioClient.company_web_url(match.company_id or "")
+            existing_loc = location_label(match)
+            source = deal.get("source") or fallback_source
+            dup_description = _build_duplicate_description(
+                deal, permalink, attio_url, existing_loc
+            )
+            entry_values = _build_inbound_entry_values(
+                step=STEP_DUPLICATE,
+                source=source,
+                description=dup_description,
+                attio_member=attio_member,
+            )
+            attio.add_record_to_list(
+                list_id=INBOUND_DEALS_LIST_ID,
+                parent_record_id=match.company_id,
+                parent_object=PARENT_OBJECT,
+                entry_values=entry_values,
+                allow_duplicates=True,
+            )
             line = (
-                f"🔁 {company_name} — already in {location_label(match)} "
-                f"({attio_url})"
+                f"🔁 {company_name} — already in {existing_loc}; "
+                f"logged as Duplicate ({attio_url})"
             )
             return {"outcome": "duplicate", "line": line}
 
@@ -205,18 +228,12 @@ def _process_one_deal(
         source = deal.get("source") or fallback_source
         description = _build_inbound_description(deal, permalink)
 
-        entry_values: dict[str, Any] = {
-            "source": source,
-            "description": description,
-            "step": STEP_NEW,
-        }
-        if attio_member:
-            entry_values["deal_lead"] = [
-                {
-                    "referenced_actor_type": "workspace-member",
-                    "referenced_actor_id": attio_member,
-                }
-            ]
+        entry_values = _build_inbound_entry_values(
+            step=STEP_NEW,
+            source=source,
+            description=description,
+            attio_member=attio_member,
+        )
 
         attio.add_record_to_list(
             list_id=INBOUND_DEALS_LIST_ID,
@@ -277,7 +294,14 @@ def _apply_stealth_name(deal: dict[str, Any]) -> dict[str, Any]:
 
 
 def _upsert_company(attio: AttioClient, deal: dict[str, Any]) -> dict:
-    """Create or upsert a company. Prefer upsert-by-domain; fall back to create."""
+    """Create or upsert a company. Prefer upsert-by-domain; fall back to create.
+
+    On *creation* (no domain → fresh company), also look up matching
+    People records by founder LinkedIn / name and include them in the
+    Company's `team` attribute. We don't touch `team` on assert_company
+    calls because the company already exists in Attio and may have
+    pre-existing team links we don't want to overwrite.
+    """
     values: dict[str, Any] = {}
 
     name = deal.get("company_name")
@@ -297,8 +321,132 @@ def _upsert_company(attio: AttioClient, deal: dict[str, Any]) -> dict:
         values["linkedin"] = linkedin
 
     if domain:
+        # Existing-or-new path; don't touch team to avoid clobber.
         return attio.assert_company(values, matching="domains")
+
+    # Fresh-company path — also link any matched existing People.
+    person_ids = _resolve_existing_people(attio, deal.get("founders") or [])
+    if person_ids:
+        values["team"] = [
+            {"target_object": "people", "target_record_id": pid}
+            for pid in person_ids
+        ]
     return attio.create_company(values)
+
+
+def _resolve_existing_people(
+    attio: AttioClient, founders: list[dict[str, Any]]
+) -> list[str]:
+    """For each founder, find an existing Attio Person record (by LinkedIn,
+    then by fuzzy name). Returns a deduplicated list of matched record IDs.
+    Does NOT create new People — only links to existing ones.
+    """
+    matched: list[str] = []
+    seen: set[str] = set()
+    for founder in founders:
+        person = _lookup_person(attio, founder)
+        if not person:
+            continue
+        pid = (person.get("id") or {}).get("record_id")
+        if pid and pid not in seen:
+            matched.append(pid)
+            seen.add(pid)
+    return matched
+
+
+def _lookup_person(
+    attio: AttioClient, founder: dict[str, Any]
+) -> dict | None:
+    # 1) Exact match on LinkedIn URL.
+    linkedin = founder.get("linkedin")
+    if linkedin:
+        try:
+            people = attio.find_people_by_linkedin(linkedin)
+            if people:
+                return people[0]
+        except Exception as e:
+            print(f"[people-lookup] linkedin search failed for {linkedin}: {e}")
+
+    # 2) Fuzzy name match.
+    name = founder.get("name")
+    if not name:
+        return None
+    token = _first_significant_token(name)
+    if not token:
+        return None
+    try:
+        candidates = attio.find_people_by_name_contains(token, limit=20)
+    except Exception as e:
+        print(f"[people-lookup] name search failed for {name}: {e}")
+        return None
+    best = None
+    best_score = 0
+    for c in candidates:
+        cand = AttioClient.person_name(c)
+        if not cand:
+            continue
+        score = fuzz.ratio(name.lower(), cand.lower())
+        if score >= NAME_FUZZY_THRESHOLD and score > best_score:
+            best = c
+            best_score = score
+    return best
+
+
+def _build_inbound_entry_values(
+    *,
+    step: str,
+    source: str | None,
+    description: str | None,
+    attio_member: str | None,
+) -> dict[str, Any]:
+    """Build the entry_values payload for an Inbound Deals entry, dropping
+    any keys whose value is None/empty. Attio rejects explicit nulls on
+    text attributes with a 400 validation_type error."""
+    values: dict[str, Any] = {"step": step}
+    if source:
+        values["source"] = source
+    if description:
+        values["description"] = description
+    if attio_member:
+        values["deal_lead"] = [
+            {
+                "referenced_actor_type": "workspace-member",
+                "referenced_actor_id": attio_member,
+            }
+        ]
+    return values
+
+
+def _build_duplicate_description(
+    deal: dict[str, Any],
+    permalink: str,
+    existing_attio_url: str,
+    existing_loc: str,
+) -> str:
+    """Description for an Inbound entry created on a duplicate match."""
+    bits: list[str] = [
+        f"Duplicate share — already in: {existing_loc}",
+        f"Existing: {existing_attio_url}",
+    ]
+    source = deal.get("source")
+    if source:
+        bits.append(f"Resharer: {source}")
+    sector = deal.get("sector")
+    if sector:
+        bits.append(f"Sector: {sector}")
+    stage = deal.get("stage")
+    round_size = deal.get("round_size_eur_m")
+    if stage and stage != "Unknown":
+        round_str = f" (€{round_size}M)" if round_size else ""
+        bits.append(f"Round: {stage}{round_str}")
+    elif round_size:
+        bits.append(f"Round: €{round_size}M")
+    if permalink:
+        bits.append(f"Slack: {permalink}")
+    extra = deal.get("description")
+    if extra:
+        return f"{extra}\n\n" + "\n".join(bits)
+    return "\n".join(bits)
 
 
 def _build_inbound_description(deal: dict[str, Any], permalink: str) -> str:

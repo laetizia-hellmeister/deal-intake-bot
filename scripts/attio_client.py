@@ -78,6 +78,49 @@ class AttioClient:
         filt = {"name": {"$contains": token}}
         return self.query_companies(filt, limit=limit)
 
+    # -- people ------------------------------------------------------------
+
+    def query_people(self, filter_: dict, limit: int = 25) -> list[dict]:
+        body = {"filter": filter_, "limit": limit}
+        data = self._request("POST", "/objects/people/records/query", json=body)
+        return data.get("data", [])
+
+    def find_people_by_linkedin(self, linkedin_url: str) -> list[dict]:
+        if not linkedin_url:
+            return []
+        return self.query_people({"linkedin": linkedin_url}, limit=5)
+
+    def find_people_by_name_contains(
+        self, token: str, limit: int = 50
+    ) -> list[dict]:
+        """Search People whose full_name contains a token.
+
+        People `name` is a `personal-name` attribute; the contains filter
+        is keyed on `full_name`. Falls back to a simpler form on 400.
+        """
+        if not token:
+            return []
+        try:
+            return self.query_people(
+                {"name": {"full_name": {"$contains": token}}}, limit=limit
+            )
+        except AttioError:
+            try:
+                return self.query_people(
+                    {"name": {"$contains": token}}, limit=limit
+                )
+            except AttioError:
+                return []
+
+    @staticmethod
+    def person_name(record: dict) -> str | None:
+        values = (record or {}).get("values") or {}
+        items = values.get("name") or []
+        if items and isinstance(items, list):
+            v = items[0]
+            return v.get("full_name") or v.get("value")
+        return None
+
     def create_company(self, values: dict[str, Any]) -> dict:
         """POST /objects/companies/records — returns the created record."""
         body = {"data": {"values": values}}

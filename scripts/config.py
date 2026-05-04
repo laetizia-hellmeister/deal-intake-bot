@@ -58,6 +58,7 @@ STEP_NEW = "New"
 STEP_ADD_TO_PIPELINE = "Add to pipeline"
 STEP_NOT_RELEVANT = "Not relevant"
 STEP_ADDED = "Added"
+STEP_DUPLICATE = "Duplicate"
 
 # Deal Pipeline stage on creation
 PIPELINE_STAGE_NEW = "New"
