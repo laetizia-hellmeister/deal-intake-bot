@@ -11,26 +11,38 @@ from anthropic import Anthropic
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
 SYSTEM_PROMPT = """You extract structured deal info from messages sent by a VC about companies
-they're considering for investment. Return ONLY valid JSON, no preamble.
+they're considering for investment. A single message may contain multiple deals
+(e.g. a bulleted list). Return ONLY valid JSON, no preamble.
 
 Schema:
 {
-  "is_deal": boolean,
-  "company_name": string | null,
-  "website": string | null,
-  "domain": string | null,
-  "linkedin_url": string | null,
-  "founders": [ { "name": string, "linkedin": string | null } ],
-  "stage": string | null,
-  "round_size_eur_m": number | null,
-  "sector": string | null,
-  "description": string | null,
-  "source": string | null
+  "deals": [
+    {
+      "is_deal": boolean,
+      "company_name": string | null,
+      "website": string | null,
+      "domain": string | null,
+      "linkedin_url": string | null,
+      "founders": [ { "name": string, "linkedin": string | null } ],
+      "stage": string | null,
+      "round_size_eur_m": number | null,
+      "sector": string | null,
+      "description": string | null,
+      "source": string | null
+    }
+  ]
 }
 
 Rules:
-- is_deal = true only if the message references an identifiable company
-  (name or website). Casual chatter, status updates, and off-topic messages -> false.
+- The top-level object always has a single key "deals" containing an array.
+- Extract each distinct deal as a separate item in the array. A bulleted list
+  of three companies = three items. A single company in prose = one item.
+- If the message is casual chatter / status updates / off-topic, return
+  {"deals": []} (empty array).
+- For each item, is_deal = true only if it references an identifiable
+  company (a name) OR an identifiable founder (a person's name with or
+  without a website). Stealth companies that name only a founder are still
+  deals (set company_name = null and put the founder in `founders`).
 - Do NOT invent data. Missing fields -> null.
 - Normalize stage to one of: "Angel", "Pre-seed", "Seed", "Series A",
   "Series B", "Series C", "Unknown". Examples:
@@ -38,7 +50,9 @@ Rules:
   "seed round" / "seed stage" -> "Seed"
   "series a" -> "Series A"
 - domain = root domain only (strip protocol, www., path, query).
-- source = who shared this deal, e.g. "John from Atomico". null if not stated.
+- source = who shared this deal, e.g. "John from Atomico". If the source is
+  stated once at the top of a multi-deal message, copy it onto each deal.
+  null if not stated.
 - Return only the JSON object, nothing else.
 """
 
@@ -65,12 +79,18 @@ def _extract_json_object(text: str) -> dict:
         return json.loads(text[start : end + 1])
 
 
-def extract_deal(message_text: str, client: Anthropic | None = None) -> dict[str, Any]:
-    """Send a Slack message to Claude and return the parsed deal JSON."""
+def extract_deals(
+    message_text: str, client: Anthropic | None = None
+) -> list[dict[str, Any]]:
+    """Send a Slack message to Claude and return a list of parsed deals.
+
+    The list may have 0, 1, or more entries. Each entry has the same keys
+    as the previous single-deal extractor returned. Empty list = chatter.
+    """
     c = client or Anthropic(api_key=ANTHROPIC_API_KEY)
     resp = c.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=1024,
+        max_tokens=2048,  # bumped — multi-deal messages need more tokens
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message_text}],
     )
@@ -83,7 +103,27 @@ def extract_deal(message_text: str, client: Anthropic | None = None) -> dict[str
     if not raw.strip():
         raise ExtractionError("Empty response from Claude")
     data = _extract_json_object(raw)
-    return _normalize(data)
+
+    # Accept either the new shape `{"deals": [...]}` or the legacy single
+    # object shape (backward-compat in case the LLM forgets the wrapper).
+    if isinstance(data, dict) and isinstance(data.get("deals"), list):
+        items = data["deals"]
+    elif isinstance(data, dict) and ("is_deal" in data or "company_name" in data):
+        items = [data]
+    else:
+        items = []
+
+    return [_normalize(item) for item in items if isinstance(item, dict)]
+
+
+# Back-compat alias — older callers may still use extract_deal.
+def extract_deal(
+    message_text: str, client: Anthropic | None = None
+) -> dict[str, Any]:
+    deals = extract_deals(message_text, client=client)
+    if not deals:
+        return _normalize({"is_deal": False})
+    return deals[0]
 
 
 def _normalize(data: dict[str, Any]) -> dict[str, Any]:
