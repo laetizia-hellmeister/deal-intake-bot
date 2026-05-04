@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,7 @@ from rapidfuzz import fuzz
 
 from attio_client import AttioClient, AttioError
 from config import (
+    ATTIO_MEMBER_TO_SLACK_USER,
     DEAL_PIPELINE_LIST_ID,
     INBOUND_DEALS_LIST_ID,
     IN_SCOPE_STAGES,
@@ -29,6 +31,7 @@ from config import (
     PIPELINE_DEFAULT_STAGE,
     PIPELINE_SOURCING_CHANNELS,
     STEP_ADDED,
+    STEP_NEW,
 )
 from slack_client import SlackClient
 
@@ -90,9 +93,41 @@ def main() -> int:
         _mark_added(attio, entry_id, failed, company_name)
         promoted.append(company_name)
 
-    _post_summary(slack, promoted, failed)
+    open_breakdown = _open_breakdown(attio)
+    _post_summary(slack, promoted, failed, open_breakdown)
     attio.close()
     return 0
+
+
+def _open_breakdown(attio: AttioClient) -> Counter | None:
+    """Count Inbound entries with Step=New, grouped by first deal_lead.
+
+    Returns a Counter[str | None] keyed by Attio workspace_member_id, with
+    None bucketing entries that have no deal lead. Returns None on error
+    so the summary is still posted (without the breakdown).
+    """
+    try:
+        entries = attio.query_list_entries(
+            INBOUND_DEALS_LIST_ID,
+            filter_={"step": STEP_NEW},
+            limit=200,
+        )
+    except Exception as e:
+        print(f"Failed to fetch open deals for breakdown: {e}")
+        return None
+
+    counts: Counter = Counter()
+    for entry in entries:
+        ev = entry.get("entry_values") or {}
+        leads = ev.get("deal_lead") or []
+        member_id: str | None = None
+        if leads and isinstance(leads, list) and isinstance(leads[0], dict):
+            first = leads[0]
+            member_id = first.get("referenced_actor_id") or (
+                first.get("actor") or {}
+            ).get("id")
+        counts[member_id] += 1
+    return counts
 
 
 def _in_target_window(now_local: datetime) -> bool:
@@ -431,9 +466,11 @@ def _post_summary(
     slack: SlackClient,
     promoted: list[str],
     failed: list[tuple[str, str]],
+    open_breakdown: Counter | None,
 ) -> None:
-    if not promoted and not failed:
-        print("Nothing to promote.")
+    has_open = bool(open_breakdown)
+    if not promoted and not failed and not has_open:
+        print("Nothing to promote and no open deals — skipping post.")
         return
 
     lines: list[str] = []
@@ -443,11 +480,31 @@ def _post_summary(
         )
         for name in promoted:
             lines.append(f"• {name}")
+    else:
+        lines.append("🗓️ Daily promotion: nothing new moved to Deal Pipeline.")
+
     if failed:
         lines.append("")
         lines.append(f"⚠️ {len(failed)} failed:")
         for name, why in failed:
             lines.append(f"• {name} — {why}")
+
+    if has_open:
+        lines.append("")
+        lines.append("*Still waiting for review:*")
+        # Sort: highest count first; unassigned bucket last regardless.
+        items = sorted(
+            open_breakdown.items(),
+            key=lambda kv: (kv[0] is None, -kv[1], kv[0] or ""),
+        )
+        for member_id, count in items:
+            plural = "s" if count != 1 else ""
+            if member_id is None:
+                mention = "_unassigned_"
+            else:
+                slack_uid = ATTIO_MEMBER_TO_SLACK_USER.get(member_id)
+                mention = f"<@{slack_uid}>" if slack_uid else "_unmapped_"
+            lines.append(f"• {mention} — {count} deal{plural} waiting")
 
     try:
         slack.post_message("\n".join(lines))
