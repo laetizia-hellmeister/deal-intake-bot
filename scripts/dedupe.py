@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from rapidfuzz import fuzz
@@ -11,6 +12,7 @@ from rapidfuzz import fuzz
 from attio_client import AttioClient
 from config import (
     DEAL_PIPELINE_LIST_ID,
+    DUPLICATE_RECENCY_DAYS,
     INBOUND_DEALS_LIST_ID,
     NAME_FUZZY_THRESHOLD,
     NAME_STOP_WORDS,
@@ -24,6 +26,11 @@ class DedupeMatch:
     score: float = 100.0
     in_inbound_deals: bool = False
     in_deal_pipeline: bool = False
+    # True if there's an Inbound Deals entry for this company created
+    # within DUPLICATE_RECENCY_DAYS. Stale matches (e.g. a 5-year-old
+    # Company record with no recent Inbound activity) get this False
+    # and the ingest treats the deal as fresh.
+    recent_inbound: bool = False
 
     @property
     def company_id(self) -> str | None:
@@ -107,21 +114,79 @@ def find_duplicate(
 
 
 def _enrich(attio: AttioClient, match: DedupeMatch) -> DedupeMatch:
-    """Populate `in_inbound_deals` / `in_deal_pipeline` for a match."""
+    """Populate list-membership and recency fields on a match."""
     cid = match.company_id
     if not cid:
         return match
     try:
-        match.in_inbound_deals = bool(
-            attio.find_list_entries_for_company(INBOUND_DEALS_LIST_ID, cid)
-        )
-        match.in_deal_pipeline = bool(
-            attio.find_list_entries_for_company(DEAL_PIPELINE_LIST_ID, cid)
+        inbound_entries = attio.find_list_entries_for_company(
+            INBOUND_DEALS_LIST_ID, cid
         )
     except Exception:
-        # Enrichment is best-effort; don't let it hide the dedupe result.
-        pass
+        inbound_entries = []
+    try:
+        pipeline_entries = attio.find_list_entries_for_company(
+            DEAL_PIPELINE_LIST_ID, cid
+        )
+    except Exception:
+        pipeline_entries = []
+
+    match.in_inbound_deals = bool(inbound_entries)
+    match.in_deal_pipeline = bool(pipeline_entries)
+    match.recent_inbound = _has_recent_inbound(inbound_entries)
     return match
+
+
+def _has_recent_inbound(entries: list[dict]) -> bool:
+    """True if any entry was created within the last DUPLICATE_RECENCY_DAYS."""
+    if not entries:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DUPLICATE_RECENCY_DAYS)
+    for entry in entries:
+        ts = _entry_created_at(entry)
+        if ts and ts >= cutoff:
+            return True
+    return False
+
+
+def _entry_created_at(entry: dict) -> datetime | None:
+    """Pull a UTC datetime out of an entry's `created_at` value."""
+    raw = (entry or {}).get("created_at")
+    if not raw:
+        # Some Attio responses nest entry attributes under entry_values.
+        raw = ((entry or {}).get("entry_values") or {}).get("created_at")
+    iso = _first_text_value(raw)
+    if not iso:
+        return None
+    return _parse_iso_utc(iso)
+
+
+def _first_text_value(v: Any) -> str | None:
+    if not v:
+        return None
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list) and v:
+        return _first_text_value(v[0])
+    if isinstance(v, dict):
+        return v.get("value") or v.get("formatted")
+    return None
+
+
+def _parse_iso_utc(iso: str) -> datetime | None:
+    """Parse an ISO 8601 timestamp; ensure UTC tzinfo."""
+    s = iso.strip()
+    # Python 3.11 fromisoformat handles trailing 'Z' from 3.11+, but normalise
+    # for safety on older fields like ".000Z".
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def location_label(match: DedupeMatch) -> str:

@@ -99,6 +99,13 @@ INGEST_MESSAGE_LIMIT = 50
 NAME_FUZZY_THRESHOLD = 85
 NAME_STOP_WORDS = {"the", "inc", "ltd", "gmbh", "ag", "sa", "llc", "co"}
 
+# A new deal is only marked as "Duplicate" if the matching Company has
+# at least one Inbound Deals entry created within this window. Older
+# Company records (no recent Inbound activity) are treated as fresh
+# deals and added with Step=New, pointed at the existing Company so
+# we don't create a parallel record.
+DUPLICATE_RECENCY_DAYS = 60
+
 # --- Slack user -> Attio workspace member mapping ---
 # Used to populate the Sourcer and Deal Lead attributes on Inbound Deals
 # entries. Sourcer is always the Slack poster; Deal Lead is any

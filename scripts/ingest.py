@@ -227,11 +227,15 @@ def _process_one_deal(
             )
             return {"outcome": "out_of_scope", "line": line}
 
-        # Dedupe — if the company already exists, still record this share
-        # in Inbound Deals as a Duplicate entry so we can count repeat
-        # shares.
+        # Dedupe. A company match only counts as Duplicate if it has
+        # had Inbound Deals activity in the recency window
+        # (DUPLICATE_RECENCY_DAYS). Older Company records — e.g. a
+        # 5-year-old Companies row with no recent Inbound entries —
+        # are treated as fresh deals and added with Step=New, but
+        # we still point the new entry at the existing Company so
+        # we don't create a duplicate Companies record.
         match = find_duplicate(attio, deal)
-        if match:
+        if match and match.recent_inbound:
             attio_url = AttioClient.company_web_url(match.company_id or "")
             existing_loc = location_label(match)
             source = _format_source(deal, fallback_source)
@@ -258,11 +262,19 @@ def _process_one_deal(
             )
             return {"outcome": "duplicate", "line": line}
 
-        # New -> upsert company + add to Inbound Deals
-        company_record = _upsert_company(attio, deal)
-        company_id = AttioClient.record_id(company_record)
-        if not company_id:
-            raise RuntimeError("Attio did not return a company record id")
+        # New deal path. Two sub-cases:
+        #   - No match at all: upsert/create the Company.
+        #   - Stale match (Company exists but no recent Inbound): use
+        #     the existing Company id; do NOT create a new Companies row.
+        if match:
+            company_id = match.company_id
+            if not company_id:
+                raise RuntimeError("Stale match had no company_id")
+        else:
+            company_record = _upsert_company(attio, deal)
+            company_id = AttioClient.record_id(company_record)
+            if not company_id:
+                raise RuntimeError("Attio did not return a company record id")
 
         source = _format_source(deal, fallback_source)
         description = _build_inbound_description(deal, permalink)
