@@ -24,8 +24,8 @@ from config import (
     IN_SCOPE_STAGES,
     NAME_FUZZY_THRESHOLD,
     PARENT_OBJECT,
+    PIPELINE_DEFAULT_STAGE,
     PIPELINE_SOURCING_CHANNELS,
-    PIPELINE_STAGE_NEW,
     STEP_ADDED,
 )
 from slack_client import SlackClient
@@ -102,7 +102,8 @@ def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
     """Build entry_values for the new Deal Pipeline entry.
 
     Set on every promotion:
-      stage = "New"
+      stage       = PIPELINE_DEFAULT_STAGE ("Outreach")
+      review_date = today's date (Europe/Copenhagen)
     Carried over from the Inbound entry when present:
       sourcer    (actor-reference, same shape on both lists)
       deal_lead  (actor-reference, same shape on both lists)
@@ -114,7 +115,11 @@ def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
       upcoming_round / upcoming_round_size_eum — kept for completeness,
         not currently populated on Inbound.
     """
-    values: dict = {"stage": PIPELINE_STAGE_NEW}
+    today_local = datetime.now(ZoneInfo("Europe/Copenhagen")).date().isoformat()
+    values: dict = {
+        "stage": PIPELINE_DEFAULT_STAGE,
+        "review_date": today_local,
+    }
 
     inbound_values = entry.get("entry_values") or {}
 

@@ -60,8 +60,11 @@ STEP_NOT_RELEVANT = "Not relevant"
 STEP_ADDED = "Added"
 STEP_DUPLICATE = "Duplicate"
 
-# Deal Pipeline stage on creation
-PIPELINE_STAGE_NEW = "New"
+# Deal Pipeline status on creation. The api_slug for "Status" on Deal
+# Pipeline is `stage`; valid options include New, To qualify, Outreach,
+# Intro Call, etc. We default to Outreach so that promoted deals
+# immediately surface in the team's "do something with these" view.
+PIPELINE_DEFAULT_STAGE = "Outreach"
 
 # Valid `sourcing_channel` select options on Deal Pipeline. The LLM picks
 # one when the message makes the channel clear; promote.py maps the picked
