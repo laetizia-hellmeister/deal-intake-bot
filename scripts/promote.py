@@ -31,8 +31,12 @@ from config import (
     PIPELINE_DEFAULT_STAGE,
     PIPELINE_SOURCING_CHANNELS,
     STEP_ADDED,
+    STEP_DUPLICATE,
     STEP_NEW,
+    STEP_NOT_RELEVANT,
+    STEP_PASSED_RECENT,
 )
+from dedupe import extract_inbound_step, extract_pipeline_stage
 from slack_client import SlackClient
 
 
@@ -96,6 +100,8 @@ def main() -> int:
     # Slack-posting policy:
     #  - Evening run (17:30) and manual runs: full digest with open
     #    breakdown + @-mentions. This is the daily "queue check-in".
+    #    Also runs the cleanup pass that archives stale Duplicate /
+    #    Passed (<100 days) entries whose parent deal is done.
     #  - Noon run: silent unless something failed. Promotions still
     #    happen — the deals just appear in Deal Pipeline without a
     #    Slack post until the evening digest counts them in the queue.
@@ -103,6 +109,7 @@ def main() -> int:
     if is_evening_or_manual:
         open_breakdown = _open_breakdown(attio)
         _post_summary(slack, promoted, failed, open_breakdown)
+        _archive_completed_duplicates(attio)
     elif failed:
         # Noon run with errors — surface them so they don't get lost.
         _post_summary(slack, [], failed, None)
@@ -537,6 +544,131 @@ def _post_summary(
 
 def _short(s: str, n: int = 160) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
+
+
+# ---------------------------------------------------------------------
+# Cleanup: archive Duplicate / Passed (<100 days) entries whose parent
+# deal is no longer being actively triaged.
+# ---------------------------------------------------------------------
+
+# Pipeline statuses that signal "no longer being worked on".
+PIPELINE_DONE_STATUSES = frozenset(
+    {"To Pass", "Action Tracking", "Tracking", "Passed", "Lost"}
+)
+# Inbound steps that signal "we already passed".
+INBOUND_DONE_STEPS = frozenset({"Not relevant", "Passed (<100 days)"})
+
+
+def _archive_completed_duplicates(attio: AttioClient) -> None:
+    """For every Inbound entry with Step ∈ {Duplicate, Passed (<100 days)},
+    if the parent Company has any other Inbound or Pipeline entry in a
+    'done' state, flip this entry's Step to Not relevant.
+
+    Pipeline 'done' = status ∈ {To Pass, Action Tracking, Tracking,
+    Passed, Lost}.
+    Inbound 'done' = step ∈ {Not relevant, Passed (<100 days)} —
+    ignoring the entry currently being checked.
+
+    Logs counts to the Actions log; no Slack post.
+    """
+    candidates: list[dict] = []
+    for step in (STEP_DUPLICATE, STEP_PASSED_RECENT):
+        try:
+            entries = attio.query_list_entries(
+                INBOUND_DEALS_LIST_ID,
+                filter_={"step": step},
+                limit=200,
+            )
+        except Exception as e:
+            print(f"[cleanup] failed to fetch step={step}: {e}")
+            continue
+        candidates.extend(entries)
+
+    if not candidates:
+        print("[cleanup] no Duplicate / Passed (<100 days) entries to check")
+        return
+
+    # Cache Pipeline-done check per company_id; the Inbound check has to
+    # be redone per entry because we exclude the entry being checked.
+    pipeline_done_cache: dict[str, bool] = {}
+    archived = 0
+    skipped_active = 0
+    failed: list[str] = []
+
+    for entry in candidates:
+        entry_id = AttioClient.entry_id(entry)
+        company_id = AttioClient.parent_record_id(entry)
+        if not entry_id or not company_id:
+            continue
+
+        if not _company_done(
+            attio, company_id, exclude_entry_id=entry_id, cache=pipeline_done_cache
+        ):
+            skipped_active += 1
+            continue
+
+        try:
+            attio.update_list_entry(
+                list_id=INBOUND_DEALS_LIST_ID,
+                entry_id=entry_id,
+                entry_values={"step": STEP_NOT_RELEVANT},
+            )
+            archived += 1
+        except Exception as e:
+            print(f"[cleanup] failed to archive entry {entry_id}: {e}")
+            failed.append(entry_id)
+
+    print(
+        f"[cleanup] checked {len(candidates)} entries, "
+        f"archived {archived}, skipped {skipped_active} (parent still active), "
+        f"failed {len(failed)}"
+    )
+
+
+def _company_done(
+    attio: AttioClient,
+    company_id: str,
+    *,
+    exclude_entry_id: str | None,
+    cache: dict[str, bool],
+) -> bool:
+    """True if this Company has any Pipeline entry in a done status, OR
+    any other Inbound entry (excluding exclude_entry_id) in a done step."""
+    # Pipeline check is cacheable (doesn't depend on the entry being checked).
+    if company_id in cache:
+        if cache[company_id]:
+            return True
+    else:
+        try:
+            pipeline_entries = attio.find_list_entries_for_company(
+                DEAL_PIPELINE_LIST_ID, company_id, limit=10
+            )
+            done = any(
+                extract_pipeline_stage(e) in PIPELINE_DONE_STATUSES
+                for e in pipeline_entries
+            )
+        except Exception as e:
+            print(f"[cleanup] pipeline check failed for {company_id}: {e}")
+            done = False
+        cache[company_id] = done
+        if done:
+            return True
+
+    # Inbound check — must exclude the entry being evaluated, otherwise
+    # a Passed (<100 days) entry would always trigger archive of itself.
+    try:
+        inbound_entries = attio.find_list_entries_for_company(
+            INBOUND_DEALS_LIST_ID, company_id, limit=20
+        )
+        for e in inbound_entries:
+            if AttioClient.entry_id(e) == exclude_entry_id:
+                continue
+            if extract_inbound_step(e) in INBOUND_DONE_STEPS:
+                return True
+    except Exception as e:
+        print(f"[cleanup] inbound check failed for {company_id}: {e}")
+
+    return False
 
 
 if __name__ == "__main__":

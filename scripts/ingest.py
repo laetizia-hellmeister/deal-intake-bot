@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import sys
 import traceback
+from datetime import datetime, timezone
 from typing import Any
 
 from anthropic import Anthropic
@@ -249,6 +250,7 @@ def _process_one_deal(
         #   match exists but none of above  -> Resurface (Step=New, 🦖)
         #   no match                        -> truly new (Step=New, ✅)
         match = find_duplicate(attio, deal)
+        days_since_first_seen = _days_since_first_seen(match)
         duplicate_kind = _classify_duplicate(match)
         if duplicate_kind:
             attio_url = AttioClient.company_web_url(match.company_id or "")
@@ -284,6 +286,7 @@ def _process_one_deal(
                 sourcer_member=sourcer_member,
                 lead_members=lead_members,
                 founder_linkedins=founder_linkedins,
+                days_since_first_seen=days_since_first_seen,
             )
             attio.add_record_to_list(
                 list_id=INBOUND_DEALS_LIST_ID,
@@ -322,6 +325,7 @@ def _process_one_deal(
             sourcer_member=sourcer_member,
             lead_members=lead_members,
             founder_linkedins=founder_linkedins,
+            days_since_first_seen=days_since_first_seen,
         )
 
         attio.add_record_to_list(
@@ -557,6 +561,15 @@ def _format_source(deal: dict[str, Any], fallback: str | None) -> str | None:
     return None
 
 
+def _days_since_first_seen(match) -> int:
+    """Days between now and the earliest Inbound/Pipeline entry for the
+    matched Company. Truly-new deals (no match) get 0."""
+    if not match or not getattr(match, "first_seen_at", None):
+        return 0
+    delta = datetime.now(timezone.utc) - match.first_seen_at
+    return max(0, delta.days)
+
+
 def _build_inbound_entry_values(
     *,
     step: str,
@@ -565,6 +578,7 @@ def _build_inbound_entry_values(
     sourcer_member: str | None,
     lead_members: list[str],
     founder_linkedins: list[str] | None = None,
+    days_since_first_seen: int = 0,
 ) -> dict[str, Any]:
     """Build the entry_values payload for an Inbound Deals entry, dropping
     any keys whose value is None/empty. Attio rejects explicit nulls on
@@ -607,6 +621,8 @@ def _build_inbound_entry_values(
         # still renders one URL per line cleanly; we can switch to a
         # list payload at that point.
         values["founder_linkedin"] = "\n".join(founder_linkedins)
+    # Always set days_since_first_seen — int, default 0 for truly new.
+    values["days_since_first_seen"] = days_since_first_seen
     return values
 
 

@@ -32,6 +32,9 @@ class DedupeMatch:
     recent_inbound: bool = False              # Inbound entry created ≤60d ago
     pipeline_has_active: bool = False         # Pipeline entry in any non-terminal status
     pipeline_has_recent_terminal: bool = False  # Pipeline entry in terminal status, created ≤60d
+    # Earliest created_at across Inbound + Pipeline for this Company —
+    # anchors the "Days since first seen" metric on each new Inbound entry.
+    first_seen_at: datetime | None = None
 
     @property
     def company_id(self) -> str | None:
@@ -139,7 +142,42 @@ def _enrich(attio: AttioClient, match: DedupeMatch) -> DedupeMatch:
     match.pipeline_has_recent_terminal = _has_recent_terminal_pipeline_entry(
         pipeline_entries
     )
+    match.first_seen_at = _earliest_created_at(inbound_entries + pipeline_entries)
     return match
+
+
+def _earliest_created_at(entries: list[dict]) -> datetime | None:
+    """Return the oldest created_at from a flat list of list entries."""
+    candidates: list[datetime] = []
+    for entry in entries:
+        ts = _entry_created_at(entry)
+        if ts:
+            candidates.append(ts)
+    return min(candidates) if candidates else None
+
+
+def extract_inbound_step(entry: dict) -> str | None:
+    """Pull the Step title (e.g. 'New', 'Duplicate') from an Inbound
+    Deals list entry. Step is a select attribute; the response shape
+    varies by surface so probe a few."""
+    ev = (entry or {}).get("entry_values") or {}
+    raw = ev.get("step")
+    if not raw:
+        return None
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not isinstance(raw, dict):
+        return None
+    option = raw.get("option")
+    if isinstance(option, dict):
+        return option.get("title") or option.get("value")
+    return raw.get("title") or raw.get("value")
+
+
+def extract_pipeline_stage(entry: dict) -> str | None:
+    """Public re-export — same as the internal _extract_pipeline_stage,
+    used by promote.py during the cleanup pass."""
+    return _extract_pipeline_stage(entry)
 
 
 def _has_recent_inbound(entries: list[dict]) -> bool:

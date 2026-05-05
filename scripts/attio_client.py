@@ -164,10 +164,10 @@ class AttioClient:
         return data.get("data", [])
 
     def find_list_entries_for_company(
-        self, list_id: str, company_record_id: str
+        self, list_id: str, company_record_id: str, limit: int = 50
     ) -> list[dict]:
         filt = {"parent_record_id": company_record_id}
-        return self.query_list_entries(list_id, filter_=filt, limit=5)
+        return self.query_list_entries(list_id, filter_=filt, limit=limit)
 
     def add_record_to_list(
         self,
