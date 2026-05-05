@@ -143,6 +143,46 @@ def _enrich(attio: AttioClient, match: DedupeMatch) -> DedupeMatch:
         pipeline_entries
     )
     match.first_seen_at = _earliest_created_at(inbound_entries + pipeline_entries)
+    # --- TEMP DEBUG ---------------------------------------------------
+    print(
+        f"[debug-dedupe] company_id={cid} "
+        f"inbound={len(inbound_entries)} pipeline={len(pipeline_entries)}"
+    )
+    if inbound_entries:
+        sample = inbound_entries[0]
+        print(
+            f"[debug-dedupe] inbound sample keys={list(sample.keys())} "
+            f"top_level_created_at={sample.get('created_at')!r}"
+        )
+        ev = sample.get("entry_values") or {}
+        print(
+            f"[debug-dedupe] inbound entry_values keys={list(ev.keys())} "
+            f"ev.created_at={ev.get('created_at')!r}"
+        )
+    if pipeline_entries:
+        sample = pipeline_entries[0]
+        print(
+            f"[debug-dedupe] pipeline sample keys={list(sample.keys())} "
+            f"top_level_created_at={sample.get('created_at')!r}"
+        )
+        ev = sample.get("entry_values") or {}
+        print(
+            f"[debug-dedupe] pipeline entry_values keys={list(ev.keys())} "
+            f"ev.stage={ev.get('stage')!r}"
+        )
+        for i, e in enumerate(pipeline_entries):
+            ev = e.get("entry_values") or {}
+            print(
+                f"[debug-dedupe] pipeline[{i}] stage_extracted="
+                f"{_extract_pipeline_stage(e)!r} raw_stage={ev.get('stage')!r}"
+            )
+    print(
+        f"[debug-dedupe] flags: recent_inbound={match.recent_inbound} "
+        f"pipeline_has_active={match.pipeline_has_active} "
+        f"pipeline_has_recent_terminal={match.pipeline_has_recent_terminal} "
+        f"first_seen_at={match.first_seen_at}"
+    )
+    # ------------------------------------------------------------------
     return match
 
 
