@@ -643,17 +643,6 @@ def _company_done(
             pipeline_entries = attio.find_list_entries_for_company(
                 DEAL_PIPELINE_LIST_ID, company_id, limit=10
             )
-            # --- TEMP DEBUG -------------------------------------------
-            for i, e in enumerate(pipeline_entries):
-                ev = e.get("entry_values") or {}
-                print(
-                    f"[debug-cleanup] company={company_id} "
-                    f"pipeline[{i}] stage_extracted="
-                    f"{extract_pipeline_stage(e)!r} "
-                    f"raw_stage={ev.get('stage')!r} "
-                    f"entry_keys={list(e.keys())}"
-                )
-            # ----------------------------------------------------------
             done = any(
                 extract_pipeline_stage(e) in PIPELINE_DONE_STATUSES
                 for e in pipeline_entries
@@ -671,15 +660,6 @@ def _company_done(
         inbound_entries = attio.find_list_entries_for_company(
             INBOUND_DEALS_LIST_ID, company_id, limit=20
         )
-        # --- TEMP DEBUG -----------------------------------------------
-        for i, e in enumerate(inbound_entries):
-            ev = e.get("entry_values") or {}
-            print(
-                f"[debug-cleanup] company={company_id} "
-                f"inbound[{i}] step_extracted={extract_inbound_step(e)!r} "
-                f"raw_step={ev.get('step')!r}"
-            )
-        # --------------------------------------------------------------
         for e in inbound_entries:
             if AttioClient.entry_id(e) == exclude_entry_id:
                 continue

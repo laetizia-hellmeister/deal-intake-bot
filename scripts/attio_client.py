@@ -166,8 +166,26 @@ class AttioClient:
     def find_list_entries_for_company(
         self, list_id: str, company_record_id: str, limit: int = 50
     ) -> list[dict]:
-        filt = {"parent_record_id": company_record_id}
-        return self.query_list_entries(list_id, filter_=filt, limit=limit)
+        """Return list entries whose parent record is the given Company.
+
+        Attio's POST /lists/{list_id}/entries/query `filter` parameter only
+        operates on attribute values (entry_values like step, source).
+        It silently ignores entry-level metadata such as parent_record_id,
+        so a server-side filter on it returns zero matches every time.
+        We fetch an unfiltered page and filter client-side.
+
+        The 500 page is large enough for Inbound / Pipeline volumes in the
+        foreseeable future. If either list grows past that, we'll switch
+        to pagination.
+        """
+        all_entries = self.query_list_entries(list_id, filter_=None, limit=500)
+        matches: list[dict] = []
+        for entry in all_entries:
+            if AttioClient.parent_record_id(entry) == company_record_id:
+                matches.append(entry)
+                if len(matches) >= limit:
+                    break
+        return matches
 
     def add_record_to_list(
         self,
@@ -225,8 +243,14 @@ class AttioClient:
         pid = entry.get("parent_record_id")
         if pid:
             return pid
-        # Fallback — some responses nest it
-        return (entry.get("parent") or {}).get("record_id")
+        # Some API surfaces nest the parent under different keys.
+        for key in ("parent_record", "parent"):
+            inner = entry.get(key)
+            if isinstance(inner, dict):
+                rid = inner.get("record_id")
+                if rid:
+                    return rid
+        return None
 
     @staticmethod
     def company_name(record: dict) -> str | None:
