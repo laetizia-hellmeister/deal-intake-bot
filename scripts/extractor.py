@@ -89,12 +89,65 @@ def _extract_json_object(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # Fallback: locate outermost {...} block
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            raise ExtractionError(f"No JSON object in response: {text[:200]}")
-        return json.loads(text[start : end + 1])
+        pass
+
+    # Fallback 1: locate outermost {...} block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ExtractionError(f"No JSON object in response: {text[:200]}")
+    candidate = text[start : end + 1]
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        # Fallback 2: try to recover from a truncated `deals: [...]` list
+        # by chopping off after the last complete inner object and closing
+        # the array + outer braces. Handles the "max_tokens cut us off
+        # mid-deal" case so we keep most of the deals.
+        repaired = _repair_truncated_deals_json(candidate)
+        if repaired:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+        raise ExtractionError(
+            f"Could not parse JSON: {e} | head: {candidate[:200]!r} | "
+            f"tail: {candidate[-200:]!r}"
+        ) from e
+
+
+def _repair_truncated_deals_json(text: str) -> str | None:
+    """If the JSON is shaped like {"deals": [<obj>, <obj>, <obj truncated]}
+    we keep only the complete inner objects and close the brackets.
+    Returns the repaired string, or None if we can't make sense of it."""
+    # Find the position right after the last complete inner deal object —
+    # i.e. depth comes back to 1 (inside the deals array) after a '}'.
+    depth = 0
+    in_string = False
+    escape = False
+    last_complete_end = -1
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 1:
+                last_complete_end = i
+    if last_complete_end == -1:
+        return None
+    # Append closing bracket + brace to make it parseable.
+    return text[: last_complete_end + 1] + "]}"
 
 
 def extract_deals(
@@ -108,7 +161,7 @@ def extract_deals(
     c = client or Anthropic(api_key=ANTHROPIC_API_KEY)
     resp = c.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,  # bumped — multi-deal messages need more tokens
+        max_tokens=16384,  # generous — large fund-update lists can hit ~30 deals
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message_text}],
     )
@@ -120,7 +173,16 @@ def extract_deals(
     raw = "".join(parts)
     if not raw.strip():
         raise ExtractionError("Empty response from Claude")
-    data = _extract_json_object(raw)
+    try:
+        data = _extract_json_object(raw)
+    except ExtractionError:
+        # Surface the raw response in the run log so we can diagnose what
+        # the LLM produced when parsing fails.
+        print(
+            f"[extractor] JSON parse failed. "
+            f"Raw length={len(raw)}, head={raw[:300]!r}, tail={raw[-300:]!r}"
+        )
+        raise
 
     # Accept either the new shape `{"deals": [...]}` or the legacy single
     # object shape (backward-compat in case the LLM forgets the wrapper).
