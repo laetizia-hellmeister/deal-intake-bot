@@ -43,6 +43,7 @@ from config import (
     SLACK_USER_TO_ATTIO_MEMBER,
     STEP_DUPLICATE,
     STEP_NEW,
+    STEP_NEW_RESURFACING,
     STEP_PASSED_RECENT,
 )
 from dedupe import find_duplicate, location_label, _first_significant_token
@@ -315,7 +316,7 @@ def _process_one_deal(
         description = _build_inbound_description(deal, permalink)
 
         entry_values = _build_inbound_entry_values(
-            step=STEP_NEW,
+            step=STEP_NEW_RESURFACING if is_resurface else STEP_NEW,
             source=source,
             description=description,
             sourcer_member=sourcer_member,

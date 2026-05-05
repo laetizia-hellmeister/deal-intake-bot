@@ -64,6 +64,7 @@ STEP_NOT_RELEVANT = "Not relevant"
 STEP_ADDED = "Added"
 STEP_DUPLICATE = "Duplicate"
 STEP_PASSED_RECENT = "Passed (<100 days)"
+STEP_NEW_RESURFACING = "New (resurfacing)"
 
 # Deal Pipeline status on creation. The api_slug for "Status" on Deal
 # Pipeline is `stage`; valid options include New, To qualify, Outreach,
