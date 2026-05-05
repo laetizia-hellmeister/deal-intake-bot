@@ -16,6 +16,7 @@ from config import (
     INBOUND_DEALS_LIST_ID,
     NAME_FUZZY_THRESHOLD,
     NAME_STOP_WORDS,
+    PIPELINE_TERMINAL_STATUSES,
 )
 
 
@@ -26,11 +27,11 @@ class DedupeMatch:
     score: float = 100.0
     in_inbound_deals: bool = False
     in_deal_pipeline: bool = False
-    # True if there's an Inbound Deals entry for this company created
-    # within DUPLICATE_RECENCY_DAYS. Stale matches (e.g. a 5-year-old
-    # Company record with no recent Inbound activity) get this False
-    # and the ingest treats the deal as fresh.
-    recent_inbound: bool = False
+    # Granular activity flags computed by _enrich. Drive the ingest's
+    # outcome decision (Duplicate vs passed-recent vs resurface).
+    recent_inbound: bool = False              # Inbound entry created ≤60d ago
+    pipeline_has_active: bool = False         # Pipeline entry in any non-terminal status
+    pipeline_has_recent_terminal: bool = False  # Pipeline entry in terminal status, created ≤60d
 
     @property
     def company_id(self) -> str | None:
@@ -114,7 +115,7 @@ def find_duplicate(
 
 
 def _enrich(attio: AttioClient, match: DedupeMatch) -> DedupeMatch:
-    """Populate list-membership and recency fields on a match."""
+    """Populate list-membership and recency / status fields on a match."""
     cid = match.company_id
     if not cid:
         return match
@@ -134,6 +135,10 @@ def _enrich(attio: AttioClient, match: DedupeMatch) -> DedupeMatch:
     match.in_inbound_deals = bool(inbound_entries)
     match.in_deal_pipeline = bool(pipeline_entries)
     match.recent_inbound = _has_recent_inbound(inbound_entries)
+    match.pipeline_has_active = _has_active_pipeline_entry(pipeline_entries)
+    match.pipeline_has_recent_terminal = _has_recent_terminal_pipeline_entry(
+        pipeline_entries
+    )
     return match
 
 
@@ -147,6 +152,53 @@ def _has_recent_inbound(entries: list[dict]) -> bool:
         if ts and ts >= cutoff:
             return True
     return False
+
+
+def _has_active_pipeline_entry(entries: list[dict]) -> bool:
+    """True if any Pipeline entry has a non-terminal status (anything
+    except Passed / Lost). Captures 'currently being worked on' regardless
+    of when the entry was created."""
+    for entry in entries:
+        stage = _extract_pipeline_stage(entry)
+        if stage and stage not in PIPELINE_TERMINAL_STATUSES:
+            return True
+    return False
+
+
+def _has_recent_terminal_pipeline_entry(entries: list[dict]) -> bool:
+    """True if any Pipeline entry is in a terminal status (Passed/Lost)
+    AND was created within the last DUPLICATE_RECENCY_DAYS. Captures
+    'we passed on this recently'."""
+    if not entries:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DUPLICATE_RECENCY_DAYS)
+    for entry in entries:
+        stage = _extract_pipeline_stage(entry)
+        if not stage or stage not in PIPELINE_TERMINAL_STATUSES:
+            continue
+        ts = _entry_created_at(entry)
+        if ts and ts >= cutoff:
+            return True
+    return False
+
+
+def _extract_pipeline_stage(entry: dict) -> str | None:
+    """Pull the status title (e.g. "Outreach", "Passed") from a Pipeline
+    entry's `stage` attribute. The api_slug for the Pipeline Status field
+    is `stage` (yes, confusingly). Status comes back in different shapes
+    across the API, so probe a few."""
+    ev = (entry or {}).get("entry_values") or {}
+    raw = ev.get("stage")
+    if not raw:
+        return None
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not isinstance(raw, dict):
+        return None
+    inner_status = raw.get("status")
+    if isinstance(inner_status, dict):
+        return inner_status.get("title") or inner_status.get("name")
+    return raw.get("title") or raw.get("value") or raw.get("name")
 
 
 def _entry_created_at(entry: dict) -> datetime | None:

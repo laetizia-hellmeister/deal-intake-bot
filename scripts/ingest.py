@@ -37,10 +37,13 @@ from config import (
     REACTION_DUPLICATE,
     REACTION_ERROR,
     REACTION_NOT_DEAL,
+    REACTION_PASSED_RECENT,
+    REACTION_RESURFACE,
     REACTION_SKIPPED,
     SLACK_USER_TO_ATTIO_MEMBER,
     STEP_DUPLICATE,
     STEP_NEW,
+    STEP_PASSED_RECENT,
 )
 from dedupe import find_duplicate, location_label, _first_significant_token
 from extractor import extract_deals
@@ -217,6 +220,14 @@ def _process_one_deal(
     # Treat "Unknown" and missing as the same — both pass the scope check.
     stage_for_scope = stage if stage and stage != "Unknown" else None
 
+    # Founder LinkedIn URLs — written to the Inbound Deals `founder_linkedins`
+    # multi-text attribute so they're visible at a glance for triage.
+    founder_linkedins = [
+        f["linkedin"]
+        for f in (deal.get("founders") or [])
+        if f.get("linkedin")
+    ]
+
     try:
         # Out of scope only when the stage is *explicitly* Series A or later.
         # Missing / unknown stages are added with stage left blank.
@@ -227,27 +238,51 @@ def _process_one_deal(
             )
             return {"outcome": "out_of_scope", "line": line}
 
-        # Dedupe. A company match only counts as Duplicate if it has
-        # had Inbound Deals activity in the recency window
-        # (DUPLICATE_RECENCY_DAYS). Older Company records — e.g. a
-        # 5-year-old Companies row with no recent Inbound entries —
-        # are treated as fresh deals and added with Step=New, but
-        # we still point the new entry at the existing Company so
-        # we don't create a duplicate Companies record.
+        # Dedupe. Granular flags from DedupeMatch determine the outcome:
+        #   recent_inbound                  -> Duplicate
+        #   pipeline_has_active             -> Duplicate
+        #   pipeline_has_recent_terminal    -> Duplicate (will become its
+        #                                       own Step "passed < 60 days"
+        #                                       once that option is added
+        #                                       to Inbound.Step in Attio)
+        #   match exists but none of above  -> Resurface (Step=New, 🦖)
+        #   no match                        -> truly new (Step=New, ✅)
         match = find_duplicate(attio, deal)
-        if match and match.recent_inbound:
+        duplicate_kind = _classify_duplicate(match)
+        if duplicate_kind:
             attio_url = AttioClient.company_web_url(match.company_id or "")
             existing_loc = location_label(match)
             source = _format_source(deal, fallback_source)
             dup_description = _build_duplicate_description(
                 deal, permalink, attio_url, existing_loc
             )
+            # passed_recent gets its own Step + emoji + outcome so that
+            # Laetizia can filter the Inbound Deals view to hide deals
+            # that were recently passed in Pipeline. The other two
+            # duplicate kinds use the existing Duplicate step.
+            if duplicate_kind == "passed_recent":
+                step = STEP_PASSED_RECENT
+                emoji = "👎"
+                outcome = "passed_recent"
+                kind_label = "recently passed in Deal Pipeline"
+            else:
+                step = STEP_DUPLICATE
+                emoji = "🔁"
+                outcome = "duplicate"
+                kind_label = (
+                    "already in Inbound Deals"
+                    if duplicate_kind == "recent_inbound"
+                    else "active in Deal Pipeline"
+                    if duplicate_kind == "pipeline_active"
+                    else f"already in {existing_loc}"
+                )
             entry_values = _build_inbound_entry_values(
-                step=STEP_DUPLICATE,
+                step=step,
                 source=source,
                 description=dup_description,
                 sourcer_member=sourcer_member,
                 lead_members=lead_members,
+                founder_linkedins=founder_linkedins,
             )
             attio.add_record_to_list(
                 list_id=INBOUND_DEALS_LIST_ID,
@@ -256,16 +291,16 @@ def _process_one_deal(
                 entry_values=entry_values,
                 allow_duplicates=True,
             )
-            line = (
-                f"🔁 {company_name} — already in {existing_loc}; "
-                f"logged as Duplicate ({attio_url})"
-            )
-            return {"outcome": "duplicate", "line": line}
+            line = f"{emoji} {company_name} — {kind_label} ({attio_url})"
+            return {"outcome": outcome, "line": line}
 
         # New deal path. Two sub-cases:
         #   - No match at all: upsert/create the Company.
-        #   - Stale match (Company exists but no recent Inbound): use
-        #     the existing Company id; do NOT create a new Companies row.
+        #   - Stale match (Company exists but no recent Inbound, no
+        #     active Pipeline, no recent terminal Pipeline): treat as
+        #     a resurface — Step=New but with a 🦖 line so it's
+        #     visually distinct from a truly new deal.
+        is_resurface = bool(match)
         if match:
             company_id = match.company_id
             if not company_id:
@@ -285,6 +320,7 @@ def _process_one_deal(
             description=description,
             sourcer_member=sourcer_member,
             lead_members=lead_members,
+            founder_linkedins=founder_linkedins,
         )
 
         attio.add_record_to_list(
@@ -300,6 +336,12 @@ def _process_one_deal(
         sector = deal.get("sector") or "?"
         stage_label = stage_for_scope or "stage ?"
         attio_url = AttioClient.company_web_url(company_id)
+        if is_resurface:
+            line = (
+                f"🦖 {company_name} (resurfacing) · {stage_label} · "
+                f"{round_str} · {sector} ({attio_url})"
+            )
+            return {"outcome": "resurfacing", "line": line}
         line = (
             f"✅ {company_name} · {stage_label} · {round_str} · {sector} "
             f"({attio_url})"
@@ -317,17 +359,48 @@ def _process_one_deal(
 
 
 def _aggregate_reaction(outcomes: list[dict[str, Any]]) -> str:
-    """Pick the single message-level reaction from per-deal outcomes."""
+    """Pick the single message-level reaction from per-deal outcomes.
+
+    Priority: ⚠️ > ✅ > 🦖 > 🔁 > 👎 > ⏭️ > 🤷.
+    A mixed message (e.g. one new deal + one resurface) gets ✅ — the
+    truly-new outcome dominates. 🔁 wins over 👎 when both kinds of
+    duplicate are present, so 👎 only appears when the *whole* message
+    is recent-passes.
+    """
     types = {o["outcome"] for o in outcomes}
     if "error" in types:
         return REACTION_ERROR
     if "added" in types:
         return REACTION_ADDED
-    if "duplicate" in types and "out_of_scope" not in types:
+    if "resurfacing" in types:
+        return REACTION_RESURFACE
+    if "duplicate" in types:
         return REACTION_DUPLICATE
+    if "passed_recent" in types:
+        return REACTION_PASSED_RECENT
     if "out_of_scope" in types:
         return REACTION_SKIPPED
     return REACTION_NOT_DEAL
+
+
+def _classify_duplicate(match) -> str | None:
+    """Map a DedupeMatch to a duplicate kind, or None if not a duplicate.
+
+    Order matters — checks in order of strongest signal:
+      1. recent_inbound       -> the deal was just shared in Inbound
+      2. pipeline_has_active  -> currently being worked in Pipeline
+      3. pipeline_has_recent_terminal -> recently Passed/Lost in Pipeline
+      4. (none)               -> stale or no match; not a duplicate
+    """
+    if not match:
+        return None
+    if match.recent_inbound:
+        return "recent_inbound"
+    if match.pipeline_has_active:
+        return "pipeline_active"
+    if match.pipeline_has_recent_terminal:
+        return "passed_recent"
+    return None
 
 
 def _apply_stealth_name(deal: dict[str, Any]) -> dict[str, Any]:
@@ -360,16 +433,26 @@ def _upsert_company(attio: AttioClient, deal: dict[str, Any]) -> dict:
     if name:
         values["name"] = name
 
+    # Drop a domain that's actually linkedin.com — happens when the LLM
+    # extracts a founder's LinkedIn profile URL as the company URL. The
+    # company's domain isn't linkedin.com.
     domain = deal.get("domain")
-    if domain:
+    if domain and domain.lower() not in ("linkedin.com", "www.linkedin.com"):
         values["domains"] = [domain]
+    else:
+        domain = None  # treat as no domain for the upsert/create branch
 
     description = deal.get("description")
     if description:
         values["description"] = description
 
+    # Only set the company's `linkedin` field if it's actually a Company
+    # LinkedIn page. Personal profile URLs (linkedin.com/in/...) belong on
+    # the founder's People record (handled below via _resolve_existing_people),
+    # not on the Company. Attio's Companies.linkedin attribute rejects
+    # /in/ URLs with a 400 validation error.
     linkedin = deal.get("linkedin_url")
-    if linkedin:
+    if linkedin and not _is_personal_linkedin_url(linkedin):
         values["linkedin"] = linkedin
 
     if domain:
@@ -384,6 +467,14 @@ def _upsert_company(attio: AttioClient, deal: dict[str, Any]) -> dict:
             for pid in person_ids
         ]
     return attio.create_company(values)
+
+
+def _is_personal_linkedin_url(url: str | None) -> bool:
+    """True if the URL is a personal LinkedIn profile (vs. a Company page)."""
+    if not url:
+        return False
+    lower = url.lower()
+    return "/in/" in lower or "/pub/" in lower
 
 
 def _resolve_existing_people(
@@ -472,6 +563,7 @@ def _build_inbound_entry_values(
     description: str | None,
     sourcer_member: str | None,
     lead_members: list[str],
+    founder_linkedins: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the entry_values payload for an Inbound Deals entry, dropping
     any keys whose value is None/empty. Attio rejects explicit nulls on
@@ -482,6 +574,10 @@ def _build_inbound_entry_values(
     lead_members:   list of Attio workspace_member_ids — any @-mentioned
                     colleagues first, then the poster. Empty if nobody
                     is mappable.
+    founder_linkedins: list of founder LinkedIn URLs extracted from the
+                    message. Stored as a multi-value text attribute on
+                    Inbound Deals so they're visible at a glance for
+                    triage. Skipped if empty.
     """
     values: dict[str, Any] = {"step": step}
     if source:
@@ -503,6 +599,13 @@ def _build_inbound_entry_values(
             }
             for m in lead_members
         ]
+    if founder_linkedins:
+        # Inbound Deals' `founder_linkedin` is a single-value text
+        # attribute, so multiple URLs are joined with newlines. If the
+        # attribute is later switched to multi-value in Attio, this
+        # still renders one URL per line cleanly; we can switch to a
+        # list payload at that point.
+        values["founder_linkedin"] = "\n".join(founder_linkedins)
     return values
 
 

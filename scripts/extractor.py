@@ -50,7 +50,14 @@ Rules:
   "preseed" / "pre seed" / "pre-seed round" -> "Pre-seed"
   "seed round" / "seed stage" -> "Seed"
   "series a" -> "Series A"
-- domain = root domain only (strip protocol, www., path, query).
+- domain = root domain only (strip protocol, www., path, query). Set to null
+  if the only URL is a personal LinkedIn (linkedin.com/in/...) — that's not
+  a company website.
+- linkedin_url = the COMPANY's LinkedIn page only (typically
+  linkedin.com/company/... or linkedin.com/showcase/...). DO NOT put
+  a personal LinkedIn profile (linkedin.com/in/...) here — personal
+  profiles belong in founders[].linkedin. Set to null if no company
+  LinkedIn page is mentioned.
 - source = who shared this deal, e.g. "Hillary from TestCo VC", "shared by
   Tom Smith". If the source is stated once at the top of a multi-deal
   message, copy it onto each deal. null if not stated.

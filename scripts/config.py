@@ -17,15 +17,19 @@ SLACK_CHANNEL_ID = "C0ATPSB31NY"
 # Reactions used to mark a message as processed. Any of these on a message
 # means "skip — already handled".
 REACTION_ADDED = "white_check_mark"       # ✅ added to Inbound Deals
+REACTION_RESURFACE = "t-rex"              # 🦖 Companies match but no recent activity; treated as fresh
 REACTION_SKIPPED = "fast_forward"         # ⏭️ out of scope
-REACTION_DUPLICATE = "repeat"             # 🔁 already tracked
+REACTION_DUPLICATE = "repeat"             # 🔁 active duplicate (recent Inbound or active Pipeline)
+REACTION_PASSED_RECENT = "-1"             # 👎 Pipeline Passed/Lost ≤100d ago
 REACTION_NOT_DEAL = "shrug"               # 🤷 not a deal
 REACTION_ERROR = "warning"                # ⚠️ processing error
 
 PROCESSED_REACTIONS = {
     REACTION_ADDED,
+    REACTION_RESURFACE,
     REACTION_SKIPPED,
     REACTION_DUPLICATE,
+    REACTION_PASSED_RECENT,
     REACTION_NOT_DEAL,
     REACTION_ERROR,
 }
@@ -59,6 +63,7 @@ STEP_ADD_TO_PIPELINE = "Add to pipeline"
 STEP_NOT_RELEVANT = "Not relevant"
 STEP_ADDED = "Added"
 STEP_DUPLICATE = "Duplicate"
+STEP_PASSED_RECENT = "Passed (<100 days)"
 
 # Deal Pipeline status on creation. The api_slug for "Status" on Deal
 # Pipeline is `stage`; valid options include New, To qualify, Outreach,
@@ -99,12 +104,19 @@ INGEST_MESSAGE_LIMIT = 50
 NAME_FUZZY_THRESHOLD = 85
 NAME_STOP_WORDS = {"the", "inc", "ltd", "gmbh", "ag", "sa", "llc", "co"}
 
-# A new deal is only marked as "Duplicate" if the matching Company has
-# at least one Inbound Deals entry created within this window. Older
-# Company records (no recent Inbound activity) are treated as fresh
-# deals and added with Step=New, pointed at the existing Company so
-# we don't create a parallel record.
-DUPLICATE_RECENCY_DAYS = 60
+# A new deal is only marked as "Duplicate" (or "Passed (<100 days)") if
+# the matching Company has activity in this window — Inbound entry
+# created within DUPLICATE_RECENCY_DAYS, or Pipeline entry created
+# within DUPLICATE_RECENCY_DAYS, or Pipeline entry in any active
+# (non-terminal) status regardless of age. Otherwise the deal is
+# treated as a resurface and added with Step=New + a 🦖 reaction.
+DUPLICATE_RECENCY_DAYS = 100
+
+# Pipeline statuses that count as "no longer active". A Pipeline entry in
+# only these statuses contributes nothing toward the duplicate signal
+# (unless it was created very recently — see _has_recent_terminal_pipeline_entry
+# in dedupe.py).
+PIPELINE_TERMINAL_STATUSES = frozenset({"Passed", "Lost"})
 
 # --- Slack user -> Attio workspace member mapping ---
 # Used to populate the Sourcer and Deal Lead attributes on Inbound Deals
