@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -587,6 +587,11 @@ def _archive_completed_duplicates(attio: AttioClient) -> None:
     Inbound 'done' = step ∈ {Not relevant, Passed (<100 days)} —
     ignoring the entry currently being checked.
 
+    To avoid paginating the (large) Deal Pipeline list once per
+    Duplicate, we pre-fetch all entries from both lists once at the
+    top, build a {company_id: [entries]} index, and use that for all
+    lookups. ~10 list-page calls total instead of N×pages.
+
     Logs counts to the Actions log; no Slack post.
     """
     candidates: list[dict] = []
@@ -606,9 +611,10 @@ def _archive_completed_duplicates(attio: AttioClient) -> None:
         print("[cleanup] no Duplicate / Passed (<100 days) entries to check")
         return
 
-    # Cache Pipeline-done check per company_id; the Inbound check has to
-    # be redone per entry because we exclude the entry being checked.
-    pipeline_done_cache: dict[str, bool] = {}
+    # One pagination pass per list, build per-company indices.
+    pipeline_index = _build_company_index(attio, DEAL_PIPELINE_LIST_ID)
+    inbound_index = _build_company_index(attio, INBOUND_DEALS_LIST_ID)
+
     archived = 0
     skipped_active = 0
     failed: list[str] = []
@@ -620,7 +626,10 @@ def _archive_completed_duplicates(attio: AttioClient) -> None:
             continue
 
         if not _company_done(
-            attio, company_id, exclude_entry_id=entry_id, cache=pipeline_done_cache
+            company_id,
+            exclude_entry_id=entry_id,
+            pipeline_index=pipeline_index,
+            inbound_index=inbound_index,
         ):
             skipped_active += 1
             continue
@@ -643,49 +652,55 @@ def _archive_completed_duplicates(attio: AttioClient) -> None:
     )
 
 
+def _build_company_index(
+    attio: AttioClient, list_id: str
+) -> dict[str, list[dict]]:
+    """Fetch all entries from a list (paginated) and group by parent_record_id."""
+    index: dict[str, list[dict]] = defaultdict(list)
+    PAGE_SIZE = 500
+    MAX_SCAN = 50_000
+    offset = 0
+    scanned = 0
+    while scanned < MAX_SCAN:
+        try:
+            page = attio.query_list_entries(
+                list_id, filter_=None, limit=PAGE_SIZE, offset=offset
+            )
+        except Exception as e:
+            print(f"[cleanup] failed fetching list {list_id} at offset {offset}: {e}")
+            break
+        if not page:
+            break
+        for entry in page:
+            cid = AttioClient.parent_record_id(entry)
+            if cid:
+                index[cid].append(entry)
+        scanned += len(page)
+        if len(page) < PAGE_SIZE:
+            break
+        offset += PAGE_SIZE
+    print(f"[cleanup] indexed {scanned} entries from list {list_id}")
+    return index
+
+
 def _company_done(
-    attio: AttioClient,
     company_id: str,
     *,
     exclude_entry_id: str | None,
-    cache: dict[str, bool],
+    pipeline_index: dict[str, list[dict]],
+    inbound_index: dict[str, list[dict]],
 ) -> bool:
     """True if this Company has any Pipeline entry in a done status, OR
-    any other Inbound entry (excluding exclude_entry_id) in a done step."""
-    # Pipeline check is cacheable (doesn't depend on the entry being checked).
-    if company_id in cache:
-        if cache[company_id]:
+    any other Inbound entry (excluding exclude_entry_id) in a done step.
+    Lookups are O(1) into the pre-built indices."""
+    for entry in pipeline_index.get(company_id, []):
+        if extract_pipeline_stage(entry) in PIPELINE_DONE_STATUSES:
             return True
-    else:
-        try:
-            pipeline_entries = attio.find_list_entries_for_company(
-                DEAL_PIPELINE_LIST_ID, company_id, limit=10
-            )
-            done = any(
-                extract_pipeline_stage(e) in PIPELINE_DONE_STATUSES
-                for e in pipeline_entries
-            )
-        except Exception as e:
-            print(f"[cleanup] pipeline check failed for {company_id}: {e}")
-            done = False
-        cache[company_id] = done
-        if done:
+    for entry in inbound_index.get(company_id, []):
+        if AttioClient.entry_id(entry) == exclude_entry_id:
+            continue
+        if extract_inbound_step(entry) in INBOUND_DONE_STEPS:
             return True
-
-    # Inbound check — must exclude the entry being evaluated, otherwise
-    # a Passed (<100 days) entry would always trigger archive of itself.
-    try:
-        inbound_entries = attio.find_list_entries_for_company(
-            INBOUND_DEALS_LIST_ID, company_id, limit=20
-        )
-        for e in inbound_entries:
-            if AttioClient.entry_id(e) == exclude_entry_id:
-                continue
-            if extract_inbound_step(e) in INBOUND_DONE_STEPS:
-                return True
-    except Exception as e:
-        print(f"[cleanup] inbound check failed for {company_id}: {e}")
-
     return False
 
 

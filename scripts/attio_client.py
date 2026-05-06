@@ -153,9 +153,13 @@ class AttioClient:
     # -- list entries ------------------------------------------------------
 
     def query_list_entries(
-        self, list_id: str, filter_: dict | None = None, limit: int = 50
+        self,
+        list_id: str,
+        filter_: dict | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict]:
-        body: dict[str, Any] = {"limit": limit}
+        body: dict[str, Any] = {"limit": limit, "offset": offset}
         if filter_:
             body["filter"] = filter_
         data = self._request(
@@ -168,23 +172,42 @@ class AttioClient:
     ) -> list[dict]:
         """Return list entries whose parent record is the given Company.
 
-        Attio's POST /lists/{list_id}/entries/query `filter` parameter only
-        operates on attribute values (entry_values like step, source).
-        It silently ignores entry-level metadata such as parent_record_id,
-        so a server-side filter on it returns zero matches every time.
-        We fetch an unfiltered page and filter client-side.
+        Attio's POST /lists/{list_id}/entries/query `filter` parameter
+        only operates on attribute values (entry_values like step,
+        source). It silently ignores entry-level metadata such as
+        parent_record_id, so server-side filtering on it returns zero
+        matches every time. We have to paginate the full list and
+        filter client-side.
 
-        The 500 page is large enough for Inbound / Pipeline volumes in the
-        foreseeable future. If either list grows past that, we'll switch
-        to pagination.
+        Iterates pages of 500 until either:
+          - we've collected `limit` matches,
+          - a page comes back smaller than the page size (last page), or
+          - we've scanned MAX_SCAN entries (safety stop on huge lists).
+
+        For the Deal Pipeline (years of history, thousands of entries),
+        this can cost several API calls per call. That's still fast in
+        absolute terms and fine for daily ingest / promote runs.
         """
-        all_entries = self.query_list_entries(list_id, filter_=None, limit=500)
+        PAGE_SIZE = 500
+        MAX_SCAN = 50_000  # ~100 pages — pragmatic upper bound
         matches: list[dict] = []
-        for entry in all_entries:
-            if AttioClient.parent_record_id(entry) == company_record_id:
-                matches.append(entry)
-                if len(matches) >= limit:
-                    break
+        offset = 0
+        scanned = 0
+        while scanned < MAX_SCAN:
+            page = self.query_list_entries(
+                list_id, filter_=None, limit=PAGE_SIZE, offset=offset
+            )
+            if not page:
+                break
+            for entry in page:
+                if AttioClient.parent_record_id(entry) == company_record_id:
+                    matches.append(entry)
+                    if len(matches) >= limit:
+                        return matches
+            scanned += len(page)
+            if len(page) < PAGE_SIZE:
+                break
+            offset += PAGE_SIZE
         return matches
 
     def add_record_to_list(
