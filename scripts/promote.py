@@ -41,19 +41,15 @@ from slack_client import SlackClient
 
 
 def main() -> int:
-    # Manual runs (workflow_dispatch) always do work — they're the
-    # "test now" / "promote now" button. Cron-triggered runs go through
-    # the time gate so only the schedules that map to a target window
-    # for the current DST state actually run.
+    # GitHub Actions cron drifts heavily on this repo (1-2 hours late on
+    # busy days) which made the previous narrow time-window gate unreliable
+    # — it skipped most runs because they fired outside the gate. Promote
+    # work and cleanup are both idempotent (only act on entries with the
+    # right Step / status), so it's safe to run them on every cron fire.
+    # The digest post is the only thing that needs once-per-day discipline,
+    # and that's handled below by checking Slack history for today's digest.
     is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     now_local = datetime.now(ZoneInfo("Europe/Copenhagen"))
-
-    if not is_manual and not _in_target_window(now_local):
-        print(
-            f"Skipping — local time is {now_local.strftime('%H:%M')}, "
-            "not within 12:00-12:59 or 17:30-18:29 window"
-        )
-        return 0
 
     attio = AttioClient()
     slack = SlackClient()
@@ -97,24 +93,72 @@ def main() -> int:
         _mark_added(attio, entry_id, failed, company_name)
         promoted.append(company_name)
 
-    # Slack-posting policy:
-    #  - Evening run (17:30) and manual runs: full digest with open
-    #    breakdown + @-mentions. This is the daily "queue check-in".
-    #    Also runs the cleanup pass that archives stale Duplicate /
-    #    Passed (<100 days) entries whose parent deal is done.
-    #  - Noon run: silent unless something failed. Promotions still
-    #    happen — the deals just appear in Deal Pipeline without a
-    #    Slack post until the evening digest counts them in the queue.
-    is_evening_or_manual = is_manual or _in_evening_window(now_local)
-    if is_evening_or_manual:
+    # Cleanup runs every cron fire — idempotent and quick.
+    _archive_completed_duplicates(attio)
+
+    # Digest posting: at most once per day, in evening-ish (local hour
+    # >= 17). We check Slack history to dedupe rather than relying on a
+    # narrow time gate. Manual runs always post (override).
+    should_post_digest = is_manual or (
+        now_local.hour >= 17
+        and not _digest_already_posted_today(slack, now_local)
+    )
+
+    if should_post_digest:
         open_breakdown = _open_breakdown(attio)
         _post_summary(slack, promoted, failed, open_breakdown)
-        _archive_completed_duplicates(attio)
     elif failed:
-        # Noon run with errors — surface them so they don't get lost.
-        _post_summary(slack, [], failed, None)
+        # Errors should never be silently swallowed — surface them
+        # even outside the digest window. (Distinct from the digest
+        # text so it doesn't trip dedupe.)
+        _post_errors_only(slack, failed)
+
     attio.close()
     return 0
+
+
+def _digest_already_posted_today(slack: SlackClient, now_local: datetime) -> bool:
+    """Check Slack channel history for a digest message posted today.
+
+    Looks for the digest's '🗓️ Daily promotion' marker in any bot
+    message since the start of the local day. Used to dedupe so multiple
+    drifted cron fires don't all post the digest.
+    """
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    seconds_today = int((now_local - today_start).total_seconds()) + 60
+    try:
+        messages = slack.fetch_recent_messages(
+            lookback_seconds=seconds_today,
+            limit=200,
+        )
+    except Exception as e:
+        print(f"[digest-dedupe] couldn't check history: {e}")
+        # Fail open — better to post a duplicate digest than to skip a
+        # run silently because the history check broke.
+        return False
+
+    for msg in messages:
+        if not (msg.get("bot_id") or msg.get("subtype") == "bot_message"):
+            continue
+        text = msg.get("text") or ""
+        if "🗓️ Daily promotion" in text:
+            return True
+    return False
+
+
+def _post_errors_only(slack: SlackClient, failed: list[tuple[str, str]]) -> None:
+    """Post a Slack message with only the failed-promotion errors. Used on
+    runs that errored but aren't posting the full digest, so the errors
+    don't get buried in the Actions log."""
+    if not failed:
+        return
+    lines = [f"⚠️ Promote run had {len(failed)} failure(s):"]
+    for name, why in failed:
+        lines.append(f"• {name} — {why}")
+    try:
+        slack.post_message("\n".join(lines))
+    except Exception as e:
+        print(f"Failed to post error summary: {e}")
 
 
 def _open_breakdown(attio: AttioClient) -> Counter | None:
@@ -146,32 +190,6 @@ def _open_breakdown(attio: AttioClient) -> Counter | None:
             ).get("id")
         counts[member_id] += 1
     return counts
-
-
-def _in_target_window(now_local: datetime) -> bool:
-    """True if the current local time is in either of the promote windows.
-
-    Two daily windows:
-      noon:    12:00-12:59 (cron fires at 12:00, allow up to 1h drift)
-      evening: 17:30-18:29 (cron fires at 17:30, allow up to 1h drift)
-    GitHub Actions cron is best-effort and can drift 5-15 min under load.
-    """
-    minutes = now_local.hour * 60 + now_local.minute
-    return _in_noon_window_minutes(minutes) or _in_evening_window_minutes(minutes)
-
-
-def _in_evening_window(now_local: datetime) -> bool:
-    """True if the current local time is in the 17:30 promote window."""
-    minutes = now_local.hour * 60 + now_local.minute
-    return _in_evening_window_minutes(minutes)
-
-
-def _in_noon_window_minutes(minutes: int) -> bool:
-    return (12 * 60) <= minutes < (13 * 60)
-
-
-def _in_evening_window_minutes(minutes: int) -> bool:
-    return (17 * 60 + 30) <= minutes < (18 * 60 + 30)
 
 
 def _promote_one(attio: AttioClient, company_id: str, entry: dict) -> None:

@@ -98,7 +98,12 @@ PIPELINE_SOURCING_CHANNELS = (
 CLAUDE_MODEL = "claude-opus-4-7"
 
 # --- Ingest ---
-INGEST_LOOKBACK_SECONDS = 3600       # 1 hour window
+# Lookback window for fetching messages from Slack on each cron fire.
+# 4 hours generously covers GitHub Actions cron drift (which can run
+# 1-2 hours late even on public repos under load). Already-processed
+# messages are filtered out by their bot reactions, so revisiting them
+# is cheap.
+INGEST_LOOKBACK_SECONDS = 14400      # 4 hours
 INGEST_MESSAGE_LIMIT = 50
 
 # --- Dedupe ---
