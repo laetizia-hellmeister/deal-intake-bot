@@ -80,20 +80,41 @@ def _score_name(a: str, b: str) -> float:
 
 
 def find_duplicate(
-    attio: AttioClient, deal: dict[str, Any]
+    attio: AttioClient,
+    deal: dict[str, Any],
+    *,
+    inbound_index: dict[str, list[dict]] | None = None,
+    pipeline_index: dict[str, list[dict]] | None = None,
 ) -> DedupeMatch | None:
-    """Check a deal against Attio Companies. Return the first match or None."""
+    """Check a deal against Attio Companies. Return the first match or None.
+
+    inbound_index / pipeline_index are optional pre-built {company_id ->
+    [entries]} maps from AttioClient.build_company_index. When provided,
+    enrichment skips paginating those lists per match. Useful when many
+    deals are processed in a single run (e.g. one Slack message containing
+    a list of 10+ deals).
+    """
     # 1) domain
     domain = _normalize_domain(deal.get("domain") or deal.get("website"))
     if domain:
         for c in attio.find_companies_by_domain(domain):
-            return _enrich(attio, DedupeMatch(company=c, reason="domain"))
+            return _enrich(
+                attio,
+                DedupeMatch(company=c, reason="domain"),
+                inbound_index=inbound_index,
+                pipeline_index=pipeline_index,
+            )
 
     # 2) linkedin
     linkedin = deal.get("linkedin_url")
     if linkedin:
         for c in attio.find_companies_by_linkedin(linkedin):
-            return _enrich(attio, DedupeMatch(company=c, reason="linkedin"))
+            return _enrich(
+                attio,
+                DedupeMatch(company=c, reason="linkedin"),
+                inbound_index=inbound_index,
+                pipeline_index=pipeline_index,
+            )
 
     # 3) name fuzzy
     name = deal.get("company_name")
@@ -112,28 +133,51 @@ def find_duplicate(
                 ):
                     best = DedupeMatch(company=c, reason="name", score=score)
             if best:
-                return _enrich(attio, best)
+                return _enrich(
+                    attio,
+                    best,
+                    inbound_index=inbound_index,
+                    pipeline_index=pipeline_index,
+                )
 
     return None
 
 
-def _enrich(attio: AttioClient, match: DedupeMatch) -> DedupeMatch:
-    """Populate list-membership and recency / status fields on a match."""
+def _enrich(
+    attio: AttioClient,
+    match: DedupeMatch,
+    *,
+    inbound_index: dict[str, list[dict]] | None = None,
+    pipeline_index: dict[str, list[dict]] | None = None,
+) -> DedupeMatch:
+    """Populate list-membership and recency / status fields on a match.
+
+    If inbound_index / pipeline_index are supplied, the relevant entries
+    are pulled from there (O(1)) instead of paginating the list per
+    match. Falls back to paginating via find_list_entries_for_company
+    when no index is available.
+    """
     cid = match.company_id
     if not cid:
         return match
-    try:
-        inbound_entries = attio.find_list_entries_for_company(
-            INBOUND_DEALS_LIST_ID, cid
-        )
-    except Exception:
-        inbound_entries = []
-    try:
-        pipeline_entries = attio.find_list_entries_for_company(
-            DEAL_PIPELINE_LIST_ID, cid
-        )
-    except Exception:
-        pipeline_entries = []
+    if inbound_index is not None:
+        inbound_entries = list(inbound_index.get(cid, []))
+    else:
+        try:
+            inbound_entries = attio.find_list_entries_for_company(
+                INBOUND_DEALS_LIST_ID, cid
+            )
+        except Exception:
+            inbound_entries = []
+    if pipeline_index is not None:
+        pipeline_entries = list(pipeline_index.get(cid, []))
+    else:
+        try:
+            pipeline_entries = attio.find_list_entries_for_company(
+                DEAL_PIPELINE_LIST_ID, cid
+            )
+        except Exception:
+            pipeline_entries = []
 
     match.in_inbound_deals = bool(inbound_entries)
     match.in_deal_pipeline = bool(pipeline_entries)

@@ -167,6 +167,45 @@ class AttioClient:
         )
         return data.get("data", [])
 
+    def build_company_index(
+        self,
+        list_id: str,
+        page_size: int = 500,
+        max_scan: int = 50_000,
+    ) -> dict[str, list[dict]]:
+        """Fetch ALL entries from a list (paginated) and group by
+        parent_record_id. Used by code paths that need to look up many
+        companies at once (cleanup, multi-deal ingest) — one paginated
+        pass per list, then O(1) lookups instead of paginating per
+        company.
+
+        Returns {company_record_id: [entries...]}. Companies with no
+        entries simply have no key (a `dict.get(cid, [])` works as the
+        client-side fallback)."""
+        from collections import defaultdict
+        index: dict[str, list[dict]] = defaultdict(list)
+        offset = 0
+        scanned = 0
+        while scanned < max_scan:
+            try:
+                page = self.query_list_entries(
+                    list_id, filter_=None, limit=page_size, offset=offset
+                )
+            except Exception as e:
+                print(f"[index] failed fetching {list_id} at offset {offset}: {e}")
+                break
+            if not page:
+                break
+            for entry in page:
+                cid = AttioClient.parent_record_id(entry)
+                if cid:
+                    index[cid].append(entry)
+            scanned += len(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return index
+
     def find_list_entries_for_company(
         self, list_id: str, company_record_id: str, limit: int = 50
     ) -> list[dict]:

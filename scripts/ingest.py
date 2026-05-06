@@ -71,22 +71,54 @@ def main() -> int:
     # Oldest first, so reactions appear in chronological order
     messages.sort(key=lambda m: float(m.get("ts", "0")))
 
+    # Filter once so we know if there's actually any work to do.
+    actionable = [
+        m
+        for m in messages
+        if not SlackClient.is_from_bot(m)
+        and not SlackClient.is_thread_reply(m)
+        and not SlackClient.has_processed_reaction(m)
+    ]
+    skipped_already = sum(
+        1
+        for m in messages
+        if not SlackClient.is_from_bot(m)
+        and not SlackClient.is_thread_reply(m)
+        and SlackClient.has_processed_reaction(m)
+    )
+
+    # Pre-fetch list-entry indices ONCE per ingest run if we're going to
+    # do any dedupe work. Each subsequent _process_one_deal call gets
+    # O(1) lookups instead of paginating Inbound + Pipeline per match.
+    # Skipped entirely on quiet ticks so the typical no-op cron run stays
+    # cheap.
+    inbound_index: dict[str, list[dict]] | None = None
+    pipeline_index: dict[str, list[dict]] | None = None
+    if actionable:
+        try:
+            inbound_index = attio.build_company_index(INBOUND_DEALS_LIST_ID)
+        except Exception as e:
+            print(f"Failed to pre-fetch Inbound index: {e}")
+        try:
+            pipeline_index = attio.build_company_index(DEAL_PIPELINE_LIST_ID)
+        except Exception as e:
+            print(f"Failed to pre-fetch Pipeline index: {e}")
+
     handled = 0
-    skipped = 0
-    for msg in messages:
-        if SlackClient.is_from_bot(msg):
-            continue
-        if SlackClient.is_thread_reply(msg):
-            continue
-        if SlackClient.has_processed_reaction(msg):
-            skipped += 1
-            continue
-        _process_message(slack, attio, anthro, msg)
+    for msg in actionable:
+        _process_message(
+            slack,
+            attio,
+            anthro,
+            msg,
+            inbound_index=inbound_index,
+            pipeline_index=pipeline_index,
+        )
         handled += 1
 
     print(
         f"Ingest complete. Processed {handled} message(s), "
-        f"skipped {skipped} already-reacted, of {len(messages)} fetched."
+        f"skipped {skipped_already} already-reacted, of {len(messages)} fetched."
     )
     attio.close()
     return 0
@@ -97,6 +129,9 @@ def _process_message(
     attio: AttioClient,
     anthro: Anthropic,
     msg: dict,
+    *,
+    inbound_index: dict[str, list[dict]] | None = None,
+    pipeline_index: dict[str, list[dict]] | None = None,
 ) -> None:
     ts = msg.get("ts")
     text = msg.get("text") or ""
@@ -147,6 +182,8 @@ def _process_message(
                     sourcer_member=sourcer_member,
                     lead_members=lead_members,
                     fallback_source=fallback_source,
+                    inbound_index=inbound_index,
+                    pipeline_index=pipeline_index,
                 )
             )
 
@@ -204,6 +241,8 @@ def _process_one_deal(
     sourcer_member: str | None,
     lead_members: list[str],
     fallback_source: str | None,
+    inbound_index: dict[str, list[dict]] | None = None,
+    pipeline_index: dict[str, list[dict]] | None = None,
 ) -> dict[str, Any]:
     """Process a single deal extracted from a Slack message.
 
@@ -249,7 +288,12 @@ def _process_one_deal(
         #                                       to Inbound.Step in Attio)
         #   match exists but none of above  -> Resurface (Step=New, 🦖)
         #   no match                        -> truly new (Step=New, ✅)
-        match = find_duplicate(attio, deal)
+        match = find_duplicate(
+            attio,
+            deal,
+            inbound_index=inbound_index,
+            pipeline_index=pipeline_index,
+        )
         days_since_first_seen = _days_since_first_seen(match)
         duplicate_kind = _classify_duplicate(match)
         if duplicate_kind:

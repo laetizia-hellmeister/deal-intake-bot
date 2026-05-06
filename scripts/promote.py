@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -612,8 +612,8 @@ def _archive_completed_duplicates(attio: AttioClient) -> None:
         return
 
     # One pagination pass per list, build per-company indices.
-    pipeline_index = _build_company_index(attio, DEAL_PIPELINE_LIST_ID)
-    inbound_index = _build_company_index(attio, INBOUND_DEALS_LIST_ID)
+    pipeline_index = attio.build_company_index(DEAL_PIPELINE_LIST_ID)
+    inbound_index = attio.build_company_index(INBOUND_DEALS_LIST_ID)
 
     archived = 0
     skipped_active = 0
@@ -650,37 +650,6 @@ def _archive_completed_duplicates(attio: AttioClient) -> None:
         f"archived {archived}, skipped {skipped_active} (parent still active), "
         f"failed {len(failed)}"
     )
-
-
-def _build_company_index(
-    attio: AttioClient, list_id: str
-) -> dict[str, list[dict]]:
-    """Fetch all entries from a list (paginated) and group by parent_record_id."""
-    index: dict[str, list[dict]] = defaultdict(list)
-    PAGE_SIZE = 500
-    MAX_SCAN = 50_000
-    offset = 0
-    scanned = 0
-    while scanned < MAX_SCAN:
-        try:
-            page = attio.query_list_entries(
-                list_id, filter_=None, limit=PAGE_SIZE, offset=offset
-            )
-        except Exception as e:
-            print(f"[cleanup] failed fetching list {list_id} at offset {offset}: {e}")
-            break
-        if not page:
-            break
-        for entry in page:
-            cid = AttioClient.parent_record_id(entry)
-            if cid:
-                index[cid].append(entry)
-        scanned += len(page)
-        if len(page) < PAGE_SIZE:
-            break
-        offset += PAGE_SIZE
-    print(f"[cleanup] indexed {scanned} entries from list {list_id}")
-    return index
 
 
 def _company_done(
