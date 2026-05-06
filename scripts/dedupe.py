@@ -186,7 +186,17 @@ def _enrich(
     match.pipeline_has_recent_terminal = _has_recent_terminal_pipeline_entry(
         pipeline_entries
     )
-    match.first_seen_at = _earliest_created_at(inbound_entries + pipeline_entries)
+    # `first_seen_at` anchors days_since_first_seen and only counts
+    # actual list activity — earliest Inbound or Pipeline entry. We
+    # deliberately do NOT include the Companies record's own
+    # created_at: a Company can land in Attio for various reasons
+    # (email-thread auto-creation, manual entry) without ever having
+    # been a deal. We only care about "the company has been a deal
+    # before" as the signal for both `days_since_first_seen` and the
+    # duplicate / resurface classification.
+    match.first_seen_at = _earliest_created_at(
+        inbound_entries + pipeline_entries
+    )
     return match
 
 

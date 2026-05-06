@@ -245,7 +245,7 @@ def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
     if channel and channel in PIPELINE_SOURCING_CHANNELS:
         values["sourcing_channel"] = [channel]
     if body:
-        source_refs = _match_source_records(attio, body)
+        source_refs = _match_source_records(attio, body, channel)
         if source_refs:
             values["source"] = source_refs
 
@@ -286,72 +286,183 @@ def _parse_source_text(text: str | None) -> tuple[str | None, str | None]:
     return text, None
 
 
-def _match_source_records(
-    attio: AttioClient, body: str
-) -> list[dict]:
-    """Look up Attio People / Companies that match the source body.
+# Channel-specific lookup strategies. Each set determines which lookup
+# path runs for a given sourcing_channel. The "VC" channel is treated
+# specially — see _match_vc_source.
+_PERSON_FIRST_CHANNELS = frozenset({
+    "Angel", "Personal Network", "Founder Network", "Portfolio Founder",
+    "LinkedIn", "Cold Email (Inbound)",
+})
+_COMPANY_FIRST_CHANNELS = frozenset({
+    "Demo Day", "Conference / Event", "Accelerator / Incubator",
+    "University", "Ecosystem / AI Campus",
+})
 
-    Strategy:
-      1. If the text has "X from Y", look up X in People and Y in Companies.
-      2. Else, try to match the whole text against People (more common to be
-         a person name) and then against Companies as a fallback.
+
+def _match_source_records(
+    attio: AttioClient, body: str, channel: str | None
+) -> list[dict]:
+    """Resolve the source text to Attio People / Companies references.
+
+    The lookup strategy depends on the sourcing_channel for fewer wrong
+    tags than blanket fuzzy matching:
+
+      VC (Denny from Angel Invest VC):
+        1. Look up the firm name in Companies.
+        2. If found, look up the person name AMONG that company's
+           team — narrows "Denny" to "the Denny who works at Angel
+           Invest" instead of the random first "Denny" in Attio.
+        3. If the firm doesn't match: skip both (firm-first bias —
+           better to leave Source empty than tag the wrong person).
+
+      Demo Day / Conference / Event / Accelerator / Incubator /
+      University / Ecosystem / AI Campus:
+        Company-only. The "FR8 demo day" is the source firm itself;
+        no individual to tag.
+
+      Angel / Personal Network / Founder Network / Portfolio Founder /
+      LinkedIn / Cold Email (Inbound):
+        Person-only. The shared-by-someone is the signal.
+
+      Unknown / null channel:
+        Best-effort: try "X from Y" split, otherwise treat as person.
 
     Returns a list of record references in Pipeline's write shape:
       [{"target_object": "people"|"companies", "target_record_id": "..."}]
-    Empty list if nothing matched well enough.
     """
-    refs: list[dict] = []
-    parts = _SOURCE_FROM_SPLIT_RE.split(body, maxsplit=1)
-    if len(parts) == 2:
-        person_part = parts[0].strip()
-        firm_part = parts[1].strip()
-        person = _lookup_person_by_name(attio, person_part)
-        if person:
-            refs.append({"target_object": "people", "target_record_id": person})
-        company = _lookup_company_by_name(attio, firm_part)
-        if company:
-            refs.append({"target_object": "companies", "target_record_id": company})
-        return refs
+    body = (body or "").strip()
+    if not body:
+        return []
 
-    # Single segment — try person first, then company.
-    person = _lookup_person_by_name(attio, body)
-    if person:
-        refs.append({"target_object": "people", "target_record_id": person})
+    person_text, firm_text = _split_source_body(body)
+
+    if channel == "VC":
+        return _match_vc_source(attio, person_text, firm_text, body)
+    if channel in _COMPANY_FIRST_CHANNELS:
+        return _match_company_only(attio, firm_text or body)
+    if channel in _PERSON_FIRST_CHANNELS:
+        return _match_person_only(attio, person_text or body)
+    # Unknown channel: tolerant fallback.
+    return _match_default_source(attio, person_text, firm_text, body)
+
+
+def _split_source_body(body: str) -> tuple[str | None, str]:
+    """'Denny from Angel Invest VC' -> ('Denny', 'Angel Invest VC').
+    'Just one name' -> (None, 'Just one name')."""
+    parts = _SOURCE_FROM_SPLIT_RE.split(body, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[0].strip(), parts[1].strip()
+    return None, body
+
+
+def _match_vc_source(
+    attio: AttioClient,
+    person_text: str | None,
+    firm_text: str,
+    full_body: str,
+) -> list[dict]:
+    """VC strategy: firm first, then person within the firm's team."""
+    refs: list[dict] = []
+    firm_query = firm_text or full_body
+    company = _lookup_company(attio, firm_query)
+    if not company:
+        # Firm-first bias: don't tag a person if we couldn't anchor on
+        # the firm — too high a chance of grabbing the wrong "Denny".
         return refs
-    company = _lookup_company_by_name(attio, body)
-    if company:
-        refs.append({"target_object": "companies", "target_record_id": company})
+    refs.append(_company_ref(company))
+
+    if person_text:
+        person = _lookup_person_in_team(attio, person_text, company)
+        if person:
+            refs.append(_person_ref(person))
     return refs
 
 
-def _lookup_person_by_name(attio: AttioClient, name: str) -> str | None:
-    """Fuzzy-match a Person record by name; return record_id of best match."""
-    name = name.strip()
+def _match_company_only(attio: AttioClient, name: str) -> list[dict]:
+    company = _lookup_company(attio, name)
+    return [_company_ref(company)] if company else []
+
+
+def _match_person_only(attio: AttioClient, name: str) -> list[dict]:
+    person = _lookup_person(attio, name)
+    return [_person_ref(person)] if person else []
+
+
+def _match_default_source(
+    attio: AttioClient,
+    person_text: str | None,
+    firm_text: str,
+    full_body: str,
+) -> list[dict]:
+    """Best-effort fallback when sourcing_channel is unknown."""
+    refs: list[dict] = []
+    if person_text:
+        company = _lookup_company(attio, firm_text)
+        if company:
+            refs.append(_company_ref(company))
+            person = _lookup_person_in_team(attio, person_text, company)
+            if not person:
+                person = _lookup_person(attio, person_text)
+            if person:
+                refs.append(_person_ref(person))
+            return refs
+    # No 'X from Y' split — try whole text against People then Companies.
+    person = _lookup_person(attio, full_body)
+    if person:
+        return [_person_ref(person)]
+    company = _lookup_company(attio, full_body)
+    if company:
+        return [_company_ref(company)]
+    return refs
+
+
+def _company_ref(record: dict) -> dict:
+    return {
+        "target_object": "companies",
+        "target_record_id": (record.get("id") or {}).get("record_id"),
+    }
+
+
+def _person_ref(record: dict) -> dict:
+    return {
+        "target_object": "people",
+        "target_record_id": (record.get("id") or {}).get("record_id"),
+    }
+
+
+def _lookup_person(attio: AttioClient, name: str) -> dict | None:
+    """Fuzzy-match a Person record by name (token_set_ratio handles
+    partial-name cases like 'Denny' against 'Denny Forberg').
+    Returns the full record dict so callers can use it further."""
+    name = (name or "").strip()
     if len(name) < 2:
         return None
     token = _first_token(name)
     if not token:
         return None
     try:
-        candidates = attio.find_people_by_name_contains(token, limit=20)
+        candidates = attio.find_people_by_name_contains(token, limit=50)
     except Exception:
         return None
-    best_id = None
+    best = None
     best_score = 0
     for c in candidates:
         cand = AttioClient.person_name(c)
         if not cand:
             continue
-        score = fuzz.ratio(name.lower(), cand.lower())
+        score = fuzz.token_set_ratio(name.lower(), cand.lower())
         if score >= NAME_FUZZY_THRESHOLD and score > best_score:
-            best_id = (c.get("id") or {}).get("record_id")
+            best = c
             best_score = score
-    return best_id
+    return best
 
 
-def _lookup_company_by_name(attio: AttioClient, name: str) -> str | None:
-    """Fuzzy-match a Company record by name; return record_id of best match."""
-    name = name.strip()
+def _lookup_company(attio: AttioClient, name: str) -> dict | None:
+    """Fuzzy-match a Company record by name (token_set_ratio).
+    Returns the full record dict (we need the team field for the
+    in-team person lookup, so the record itself is more useful than
+    just the id)."""
+    name = (name or "").strip()
     if len(name) < 2:
         return None
     token = _first_token(name)
@@ -361,17 +472,74 @@ def _lookup_company_by_name(attio: AttioClient, name: str) -> str | None:
         candidates = attio.find_companies_by_name_contains(token, limit=50)
     except Exception:
         return None
-    best_id = None
+    best = None
     best_score = 0
     for c in candidates:
         cand = AttioClient.company_name(c)
         if not cand:
             continue
-        score = fuzz.ratio(name.lower(), cand.lower())
+        score = fuzz.token_set_ratio(name.lower(), cand.lower())
         if score >= NAME_FUZZY_THRESHOLD and score > best_score:
-            best_id = (c.get("id") or {}).get("record_id")
+            best = c
             best_score = score
-    return best_id
+    return best
+
+
+def _lookup_person_in_team(
+    attio: AttioClient, person_name: str, company_record: dict
+) -> dict | None:
+    """Find a Person matching person_name AMONG the given Company's team
+    members. Critical for VC-channel matching — narrows 'Denny' to the
+    Denny who actually works at Angel Invest, instead of any random
+    Denny in the Person object."""
+    team_ids = _company_team_ids(company_record)
+    if not team_ids:
+        return None
+    name = (person_name or "").strip()
+    if len(name) < 2:
+        return None
+    token = _first_token(name)
+    if not token:
+        return None
+    try:
+        candidates = attio.find_people_by_name_contains(token, limit=50)
+    except Exception:
+        return None
+    best = None
+    best_score = 0
+    for c in candidates:
+        pid = (c.get("id") or {}).get("record_id")
+        if pid not in team_ids:
+            continue
+        cand = AttioClient.person_name(c)
+        if not cand:
+            continue
+        score = fuzz.token_set_ratio(name.lower(), cand.lower())
+        # Looser threshold (75) since we already pre-filtered to "is
+        # in this firm's team" — much less risk of a wrong tag.
+        if score >= 75 and score > best_score:
+            best = c
+            best_score = score
+    return best
+
+
+def _company_team_ids(company_record: dict) -> set[str]:
+    """Extract the set of team-member Person record_ids from a Company."""
+    values = company_record.get("values") or {}
+    team = values.get("team") or []
+    if not isinstance(team, list):
+        return set()
+    out: set[str] = set()
+    for ref in team:
+        if not isinstance(ref, dict):
+            continue
+        rid = ref.get("target_record_id")
+        if not rid:
+            inner = ref.get("target") or {}
+            rid = inner.get("record_id")
+        if rid:
+            out.add(rid)
+    return out
 
 
 def _first_token(s: str) -> str | None:
