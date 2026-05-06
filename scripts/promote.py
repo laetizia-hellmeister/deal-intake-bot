@@ -25,6 +25,7 @@ from config import (
     ATTIO_MEMBER_TO_SLACK_USER,
     DEAL_PIPELINE_LIST_ID,
     INBOUND_DEALS_LIST_ID,
+    INVESTOR_CONTACTS,
     IN_SCOPE_STAGES,
     NAME_FUZZY_THRESHOLD,
     PARENT_OBJECT,
@@ -372,7 +373,11 @@ def _match_vc_source(
     refs.append(_company_ref(company))
 
     if person_text:
-        person = _lookup_person_in_team(attio, person_text, company)
+        # Expand partial names ("FirstName" + firm hint -> full name)
+        # via the INVESTOR_CONTACTS table before hitting Attio.
+        expanded = _expand_partial_investor_name(person_text, firm_text)
+        person_query = expanded or person_text
+        person = _lookup_person_in_team(attio, person_query, company)
         if person:
             refs.append(_person_ref(person))
     return refs
@@ -400,9 +405,11 @@ def _match_default_source(
         company = _lookup_company(attio, firm_text)
         if company:
             refs.append(_company_ref(company))
-            person = _lookup_person_in_team(attio, person_text, company)
+            expanded = _expand_partial_investor_name(person_text, firm_text)
+            person_query = expanded or person_text
+            person = _lookup_person_in_team(attio, person_query, company)
             if not person:
-                person = _lookup_person(attio, person_text)
+                person = _lookup_person(attio, person_query)
             if person:
                 refs.append(_person_ref(person))
             return refs
@@ -414,6 +421,59 @@ def _match_default_source(
     if company:
         return [_company_ref(company)]
     return refs
+
+
+def _expand_partial_investor_name(
+    partial_name: str, firm_hint: str | None
+) -> str | None:
+    """Look up a partial name + firm context in INVESTOR_CONTACTS.
+
+    Returns the canonical full name from the table when there's a unique
+    match, None otherwise. The firm_hint disambiguates between contacts
+    who share a first name (e.g. two Alexes at different funds).
+
+    Matching rules:
+      - First, filter by firm: keep contacts whose firm fuzzy-matches
+        the hint (token_set_ratio >= 70). If no firm hint, all entries
+        are candidates.
+      - Then, filter by name: the partial name must match the contact's
+        first token, full name, or one of its aliases. Substring /
+        partial_ratio matches are also allowed for partials that
+        aren't a clean first-name token.
+      - Returns the full name if exactly one contact remains, else
+        None (ambiguous or no match).
+    """
+    partial = (partial_name or "").strip().lower()
+    firm = (firm_hint or "").strip().lower()
+    if not partial:
+        return None
+
+    matches: list[dict] = []
+    for entry in INVESTOR_CONTACTS:
+        # Firm filter
+        entry_firm = (entry.get("firm") or "").lower()
+        if firm and entry_firm:
+            firm_score = fuzz.token_set_ratio(firm, entry_firm)
+            if firm_score < 70:
+                continue
+
+        # Name match — try first token, full name, aliases, partial_ratio.
+        full_name = entry["name"].lower()
+        first_token = full_name.split(" ", 1)[0]
+        aliases = [a.lower() for a in entry.get("aliases", [])]
+
+        name_match = (
+            partial == first_token
+            or partial == full_name
+            or partial in aliases
+            or fuzz.partial_ratio(partial, full_name) >= 80
+        )
+        if name_match:
+            matches.append(entry)
+
+    if len(matches) == 1:
+        return matches[0]["name"]
+    return None
 
 
 def _company_ref(record: dict) -> dict:

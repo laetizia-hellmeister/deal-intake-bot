@@ -25,3 +25,4 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
+          INVESTOR_CONTACTS_JSON: ${{ secrets.INVESTOR_CONTACTS_JSON }}

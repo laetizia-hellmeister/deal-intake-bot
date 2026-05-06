@@ -4,6 +4,7 @@ Secrets come from environment variables (set via GitHub Actions secrets).
 IDs and slugs are non-sensitive and live here.
 """
 
+import json
 import os
 
 # --- Secrets (from env) ---
@@ -123,6 +124,41 @@ DUPLICATE_RECENCY_DAYS = 100
 # (unless it was created very recently — see _has_recent_terminal_pipeline_entry
 # in dedupe.py).
 PIPELINE_TERMINAL_STATUSES = frozenset({"Passed", "Lost"})
+
+# --- Known deal-sharing investor contacts ---
+# Loaded at runtime from the INVESTOR_CONTACTS_JSON GitHub secret so the
+# data is never committed to the public repo. The secret holds a JSON
+# array; each entry has:
+#   name:    canonical full name (used for the Attio lookup)
+#   firm:    firm/fund the person is associated with (None if unknown)
+#   aliases: optional list of nicknames the person might be referred to
+#            by in Slack (e.g. a short form for a longer full name)
+#
+# Used at promote time to expand a partial name like "Foo from BarVC"
+# into the canonical full name before searching Attio. Matching is
+# fuzzy on both name and firm; the firm hint disambiguates when
+# several contacts share a first name. If the secret is unset (e.g.
+# a fresh clone, local testing) the bot still works — just without
+# the expansion shortcut.
+def _load_investor_contacts() -> list[dict]:
+    raw = os.environ.get("INVESTOR_CONTACTS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"WARNING: failed to parse INVESTOR_CONTACTS_JSON: {e}")
+        return []
+    if not isinstance(data, list):
+        print(
+            "WARNING: INVESTOR_CONTACTS_JSON must be a JSON array of objects"
+        )
+        return []
+    return [item for item in data if isinstance(item, dict) and item.get("name")]
+
+
+INVESTOR_CONTACTS: list[dict] = _load_investor_contacts()
+
 
 # --- Slack user -> Attio workspace member mapping ---
 # Used to populate the Sourcer and Deal Lead attributes on Inbound Deals

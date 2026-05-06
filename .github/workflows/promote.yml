@@ -28,3 +28,4 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
+          INVESTOR_CONTACTS_JSON: ${{ secrets.INVESTOR_CONTACTS_JSON }}
