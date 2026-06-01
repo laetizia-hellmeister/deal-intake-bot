@@ -31,7 +31,8 @@ Schema:
       "source": string | null,
       "sourcing_channel": string | null,
       "geo_skip": boolean,
-      "direct_to_pipeline": boolean
+      "direct_to_pipeline": boolean,
+      "assigned_user_ids": [string]
     }
   ]
 }
@@ -101,8 +102,23 @@ Rules:
   Only set true when the phrase is clearly a DIRECTIVE about adding
   these deals — not when discussing pipeline mechanics in passing
   ("the founder wants to add us to their pipeline" -> false).
-  If the directive applies to the whole message, set it on every
-  deal in the array. Otherwise false / null.
+  CAN BE PER-DEAL. If the directive applies to one or more specific
+  deals in a list (e.g. "Add Acme to pipeline, the rest for triage",
+  or "Acme — already reached out; Beta — to triage"), set
+  direct_to_pipeline only on those specific deals. If the directive
+  applies to the whole message uniformly, set it on every deal.
+  Otherwise false / null.
+- assigned_user_ids = list of Slack user IDs (U… or W… — the bit
+  between <@ and > in mention codes like <@U093USR1DDE>) that are
+  specifically assigned to this individual deal. Use this when the
+  message routes different deals to different people, e.g.
+    "@pranav take Acme. @shrey take Beta."
+    "deals for @pranav, except Acme is mine: @laetizia"
+  → Acme gets assigned_user_ids=["U_laetizia_id"],
+    Beta gets ["U_shrey_id"], all others get ["U_pranav_id"].
+  Leave empty when the @-mentions apply to the whole message
+  uniformly ("deals for @pranav: Acme, Beta, …") — the bot picks
+  up message-level mentions automatically. Default: empty list.
 - Return only the JSON object, nothing else.
 """
 
@@ -257,7 +273,29 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         ),
         "geo_skip": bool(data.get("geo_skip")),
         "direct_to_pipeline": bool(data.get("direct_to_pipeline")),
+        "assigned_user_ids": _normalize_user_ids(data.get("assigned_user_ids")),
     }
+    return out
+
+
+def _normalize_user_ids(v: Any) -> list[str]:
+    """Filter the raw `assigned_user_ids` list to plausible Slack user IDs.
+    Tolerates the LLM occasionally returning a `<@U_xxx>` wrapper or
+    extra whitespace."""
+    if not isinstance(v, list):
+        return []
+    out: list[str] = []
+    for item in v:
+        if not isinstance(item, str):
+            continue
+        s = item.strip()
+        # Strip <@…> wrapper if the model included it.
+        m = re.match(r"^<@?([UW][A-Z0-9]+)>?$", s)
+        if m:
+            out.append(m.group(1))
+            continue
+        if re.match(r"^[UW][A-Z0-9]+$", s):
+            out.append(s)
     return out
 
 

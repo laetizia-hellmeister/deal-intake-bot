@@ -160,17 +160,14 @@ def _process_message(
         # Sourcer = always the Slack poster (single value).
         sourcer_member = poster_member
 
-        # Deal Lead = any @-mentioned colleague(s) first, then the poster.
-        # Deduplicated, preserving order, using the same Slack→Attio map.
-        mentioned_members = [
+        # Message-level @-mentions — the default Deal Lead pool. Each
+        # deal can override this by setting its own `assigned_user_ids`
+        # (resolved per-deal inside _process_one_deal).
+        message_mention_members = [
             SLACK_USER_TO_ATTIO_MEMBER[uid]
             for uid in _extract_slack_mentions(text)
             if uid in SLACK_USER_TO_ATTIO_MEMBER
         ]
-        lead_members: list[str] = []
-        for m in mentioned_members + ([poster_member] if poster_member else []):
-            if m and m not in lead_members:
-                lead_members.append(m)
 
         # Process each deal independently; collect a per-deal outcome line.
         outcomes: list[dict[str, Any]] = []
@@ -181,7 +178,8 @@ def _process_message(
                     deal=deal,
                     permalink=permalink,
                     sourcer_member=sourcer_member,
-                    lead_members=lead_members,
+                    poster_member=poster_member,
+                    message_mention_members=message_mention_members,
                     fallback_source=fallback_source,
                     inbound_index=inbound_index,
                     pipeline_index=pipeline_index,
@@ -240,7 +238,8 @@ def _process_one_deal(
     deal: dict[str, Any],
     permalink: str,
     sourcer_member: str | None,
-    lead_members: list[str],
+    poster_member: str | None,
+    message_mention_members: list[str],
     fallback_source: str | None,
     inbound_index: dict[str, list[dict]] | None = None,
     pipeline_index: dict[str, list[dict]] | None = None,
@@ -256,6 +255,25 @@ def _process_one_deal(
     # show + store in Attio. Dedupe-by-founder-LinkedIn (when wired up)
     # is what actually prevents duplicate stealth records.
     deal = _apply_stealth_name(deal)
+
+    # Resolve this deal's Deal Lead pool. If the LLM extracted per-deal
+    # assigned_user_ids (e.g. "@pranav take Acme, @shrey take Beta"),
+    # they override the message-level mentions; otherwise fall back to
+    # whoever was @-mentioned at the message level. Poster is always
+    # appended last so they're a fallback Lead too.
+    per_deal_ids = deal.get("assigned_user_ids") or []
+    if per_deal_ids:
+        deal_mention_members = [
+            SLACK_USER_TO_ATTIO_MEMBER[uid]
+            for uid in per_deal_ids
+            if uid in SLACK_USER_TO_ATTIO_MEMBER
+        ]
+    else:
+        deal_mention_members = list(message_mention_members)
+    lead_members: list[str] = []
+    for m in deal_mention_members + ([poster_member] if poster_member else []):
+        if m and m not in lead_members:
+            lead_members.append(m)
 
     company_name = deal.get("company_name") or "unknown company"
     stage = deal.get("stage")
