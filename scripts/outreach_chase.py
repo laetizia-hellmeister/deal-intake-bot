@@ -29,7 +29,10 @@ from config import (
 from slack_client import SlackClient
 
 OUTREACH_STAGE = "Outreach"
-OUTREACH_STALE_DAYS = 5  # calendar days
+# Minimum calendar days in Outreach before a deal shows up in the digest.
+# Deals at exactly this many days are shown in the first bucket; the bucket
+# boundary is hard-coded in _format_digest (6-10 vs >10).
+OUTREACH_STALE_DAYS = 6
 DIGEST_MARKER = "🐢 Outreach follow-ups"
 
 
@@ -200,8 +203,9 @@ def _group_by_first_deal_lead(entries: list[dict]) -> dict[str | None, list[dict
 def _enrich_with_company_names(
     attio: AttioClient, grouped: dict[str | None, list[dict]]
 ) -> dict[str | None, list[dict]]:
-    """Fetch the company name + days-in-Outreach for each entry. Result:
-    {lead_id: [{name, days, attio_url}, ...]}."""
+    """Fetch the company name + days-in-Outreach for each entry.
+    Returns {lead_id: [{name, days}, ...]}. No URLs — display is tabular
+    and links would break the code-block alignment."""
     out: dict[str | None, list[dict]] = {}
     now = datetime.now(timezone.utc)
     for lead_id, entries in grouped.items():
@@ -209,48 +213,80 @@ def _enrich_with_company_names(
         for entry in entries:
             company_id = AttioClient.parent_record_id(entry)
             name = "unknown"
-            attio_url = ""
             if company_id:
                 record = attio.get_record(PARENT_OBJECT, company_id)
                 if record:
                     name = AttioClient.company_name(record) or f"company:{company_id[:8]}"
                 else:
                     name = f"company:{company_id[:8]}"
-                attio_url = AttioClient.company_web_url(company_id)
             ts = _entry_created_at(entry)
             days = (now - ts).days if ts else None
-            items.append({"name": name, "days": days, "url": attio_url})
+            items.append({"name": name, "days": days})
         items.sort(key=lambda x: (-(x["days"] or 0), x["name"].lower()))
         out[lead_id] = items
     return out
+
+
+# Column widths for the code-block table inside each lead's section.
+_NAME_COL_WIDTH = 32
+_DAYS_COL_WIDTH = 8
 
 
 def _format_digest(
     enriched: dict[str | None, list[dict]],
     now_local: datetime,
 ) -> str:
+    """Build the Slack message — one section per Deal Lead with a
+    monospace code-block table grouped into two staleness buckets:
+      6–10 days  (gentle nudge)
+      >10 days  (critical — warm intro or pass)
+
+    Each lead's @-mention sits *outside* the code block so Slack
+    notifications fire; the table itself is inside ``` fences for
+    clean alignment without link clutter."""
     when = "morning" if now_local.hour < 14 else "evening"
-    lines = [
-        f"{DIGEST_MARKER} ({when} chase, >{OUTREACH_STALE_DAYS} days in Outreach):"
-    ]
-    # Sort buckets: most stale-deals first; unassigned last.
+    lines = [f"{DIGEST_MARKER} ({when} chase)"]
+
+    # Sort buckets: most total stale-deals first; unassigned last.
     items = sorted(
         enriched.items(),
         key=lambda kv: (kv[0] is None, -len(kv[1])),
     )
     for lead_id, deals in items:
+        bucket_mid = [d for d in deals if d["days"] is not None and 6 <= d["days"] <= 10]
+        bucket_crit = [d for d in deals if d["days"] is not None and d["days"] > 10]
+        if not bucket_mid and not bucket_crit:
+            continue
+
         if lead_id is None:
             mention = "_unassigned_"
         else:
             slack_uid = ATTIO_MEMBER_TO_SLACK_USER.get(lead_id)
             mention = f"<@{slack_uid}>" if slack_uid else "_unmapped_"
+
         lines.append("")
-        lines.append(f"*{mention}*")
-        for d in deals:
-            day_str = f"{d['days']} days" if d["days"] is not None else "?? days"
-            url_suffix = f" ({d['url']})" if d["url"] else ""
-            lines.append(f"• {d['name']} — {day_str}{url_suffix}")
+        lines.append(mention)
+
+        table_lines = ["```"]
+        if bucket_mid:
+            table_lines.append("6–10 days")
+            for d in sorted(bucket_mid, key=lambda x: -x["days"]):
+                table_lines.append(_format_row(d["name"], d["days"]))
+        if bucket_crit:
+            if bucket_mid:
+                table_lines.append("")
+            table_lines.append(">10 days  (critical — warm intro or pass)")
+            for d in sorted(bucket_crit, key=lambda x: -x["days"]):
+                table_lines.append(_format_row(d["name"], d["days"]))
+        table_lines.append("```")
+        lines.extend(table_lines)
     return "\n".join(lines)
+
+
+def _format_row(name: str, days: int) -> str:
+    """One table row, padded so the days column aligns."""
+    safe_name = name if len(name) <= _NAME_COL_WIDTH else name[: _NAME_COL_WIDTH - 1] + "…"
+    return f"  {safe_name.ljust(_NAME_COL_WIDTH)}{str(days).rjust(3)} days"
 
 
 # ---------------------------------------------------------------------
