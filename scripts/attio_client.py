@@ -88,9 +88,11 @@ class AttioClient:
 
     # -- companies ---------------------------------------------------------
 
-    def query_companies(self, filter_: dict, limit: int = 25) -> list[dict]:
+    def query_companies(
+        self, filter_: dict, limit: int = 25, offset: int = 0
+    ) -> list[dict]:
         """POST /objects/companies/records/query with a filter."""
-        body = {"filter": filter_, "limit": limit}
+        body = {"filter": filter_, "limit": limit, "offset": offset}
         data = self._request("POST", "/objects/companies/records/query", json=body)
         return data.get("data", [])
 
@@ -104,11 +106,29 @@ class AttioClient:
             return []
         return self.query_companies({"linkedin": linkedin_url}, limit=5)
 
-    def find_companies_by_name_contains(self, token: str, limit: int = 50) -> list[dict]:
+    def find_companies_by_name_contains(
+        self, token: str, limit: int = 300
+    ) -> list[dict]:
+        """Companies whose name contains `token`. Paginates so a common
+        token (e.g. "Stealth", shared by many records) doesn't silently
+        truncate at the first page and hide the real match."""
         if not token:
             return []
         filt = {"name": {"$contains": token}}
-        return self.query_companies(filt, limit=limit)
+        out: list[dict] = []
+        page_size = 100
+        offset = 0
+        while len(out) < limit:
+            page = self.query_companies(
+                filt, limit=min(page_size, limit - len(out)), offset=offset
+            )
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return out
 
     # -- people ------------------------------------------------------------
 

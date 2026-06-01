@@ -76,7 +76,67 @@ def _first_significant_token(name: str) -> str | None:
 
 
 def _score_name(a: str, b: str) -> float:
-    return fuzz.ratio(a.strip().lower(), b.strip().lower())
+    """Token-set ratio: tolerant of extra/reordered tokens, so
+    "Acme" vs "Acme Robotics" -> 100 and "Acme Robotics" vs
+    "Robotics, Acme" -> 100. Much better recall than plain ratio for
+    real-world company-name variation across shares."""
+    return fuzz.token_set_ratio(a.strip().lower(), b.strip().lower())
+
+
+def _stealth_founder_part(name: str | None) -> str | None:
+    """For a stealth-style company name, return the distinguishing part.
+
+      "Stealth (Maya Patel)"  -> "Maya Patel"
+      "Stealth - Maya Patel"  -> "Maya Patel"
+      "Stealth Physical AI"   -> "Physical AI"
+      "Stealth"               -> ""   (bare placeholder, nothing to match on)
+      "Acme Robotics"         -> None (not a stealth name)
+
+    Used so we compare the founder/descriptor portion of two stealth
+    names rather than the whole string (which all share the "Stealth"
+    prefix and would falsely score high)."""
+    if not name:
+        return None
+    if not re.match(r"^\s*stealth\b", name, re.IGNORECASE):
+        return None
+    paren = re.search(r"\(([^)]*)\)", name)
+    if paren:
+        return paren.group(1).strip()
+    rest = re.sub(r"^\s*stealth\b[\s\-:–—]*", "", name, flags=re.IGNORECASE)
+    return rest.strip()
+
+
+def _deal_founder_linkedins(deal: dict[str, Any]) -> list[str]:
+    """Normalized founder LinkedIn URLs from a deal."""
+    out: list[str] = []
+    for f in deal.get("founders") or []:
+        li = _normalize_linkedin(f.get("linkedin"))
+        if li:
+            out.append(li)
+    return out
+
+
+def _founder_linkedin_to_company(
+    inbound_index: dict[str, list[dict]] | None,
+) -> dict[str, str]:
+    """Build {normalized_founder_linkedin -> company_id} from the
+    `founder_linkedin` field stored on existing Inbound entries. This is
+    the dedupe key that actually works for stealth companies, where no
+    domain or company-LinkedIn exists."""
+    out: dict[str, str] = {}
+    if not inbound_index:
+        return out
+    for cid, entries in inbound_index.items():
+        for e in entries:
+            ev = e.get("entry_values") or {}
+            raw = _first_text_value(ev.get("founder_linkedin"))
+            if not raw:
+                continue
+            for url in raw.split():
+                n = _normalize_linkedin(url)
+                if n and n not in out:
+                    out[n] = cid
+    return out
 
 
 def find_duplicate(
@@ -94,7 +154,7 @@ def find_duplicate(
     deals are processed in a single run (e.g. one Slack message containing
     a list of 10+ deals).
     """
-    # 1) domain
+    # 1) domain — most authoritative for real companies.
     domain = _normalize_domain(deal.get("domain") or deal.get("website"))
     if domain:
         for c in attio.find_companies_by_domain(domain):
@@ -105,7 +165,7 @@ def find_duplicate(
                 pipeline_index=pipeline_index,
             )
 
-    # 2) linkedin
+    # 2) company LinkedIn page.
     linkedin = deal.get("linkedin_url")
     if linkedin:
         for c in attio.find_companies_by_linkedin(linkedin):
@@ -116,13 +176,57 @@ def find_duplicate(
                 pipeline_index=pipeline_index,
             )
 
-    # 3) name fuzzy
+    # 3) founder LinkedIn — the reliable key for stealth companies, which
+    # have no domain and no company-LinkedIn. Match against founder
+    # LinkedIns recorded on prior Inbound entries.
+    founder_lis = _deal_founder_linkedins(deal)
+    if founder_lis:
+        li_map = _founder_linkedin_to_company(inbound_index)
+        for li in founder_lis:
+            cid = li_map.get(li)
+            if cid:
+                minimal = {"id": {"record_id": cid}}
+                return _enrich(
+                    attio,
+                    DedupeMatch(company=minimal, reason="founder_linkedin"),
+                    inbound_index=inbound_index,
+                    pipeline_index=pipeline_index,
+                )
+
+    # 4) name fuzzy.
     name = deal.get("company_name")
     if name:
+        stealth_part = _stealth_founder_part(name)
+        if stealth_part is not None:
+            # Stealth-style name. Bare "Stealth" (empty founder part) is a
+            # generic placeholder — never name-match it (would collide with
+            # unrelated stealth companies). Otherwise compare the founder /
+            # descriptor portion against other stealth records' portions.
+            if not stealth_part:
+                return None
+            candidates = attio.find_companies_by_name_contains("Stealth")
+            best: DedupeMatch | None = None
+            for c in candidates:
+                cand_part = _stealth_founder_part(AttioClient.company_name(c))
+                if not cand_part:
+                    continue
+                score = _score_name(stealth_part, cand_part)
+                if score >= NAME_FUZZY_THRESHOLD and (
+                    best is None or score > best.score
+                ):
+                    best = DedupeMatch(company=c, reason="stealth_name", score=score)
+            if best:
+                return _enrich(
+                    attio, best,
+                    inbound_index=inbound_index,
+                    pipeline_index=pipeline_index,
+                )
+            return None
+
         token = _first_significant_token(name)
         if token:
-            candidates = attio.find_companies_by_name_contains(token, limit=50)
-            best: DedupeMatch | None = None
+            candidates = attio.find_companies_by_name_contains(token)
+            best = None
             for c in candidates:
                 cand_name = AttioClient.company_name(c)
                 if not cand_name:
