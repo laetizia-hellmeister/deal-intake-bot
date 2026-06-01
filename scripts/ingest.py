@@ -42,6 +42,7 @@ from config import (
     REACTION_RESURFACE,
     REACTION_SKIPPED,
     SLACK_USER_TO_ATTIO_MEMBER,
+    STEP_ADD_TO_PIPELINE,
     STEP_DUPLICATE,
     STEP_NEW,
     STEP_NEW_RESURFACING,
@@ -370,8 +371,20 @@ def _process_one_deal(
         source = _format_source(deal, fallback_source)
         description = _build_inbound_description(deal, permalink)
 
+        # `direct_to_pipeline=true` from the extractor means the user
+        # explicitly said "add to pipeline" / "skip triage" / etc. The
+        # Inbound entry's Step jumps straight to "Add to pipeline"
+        # so the next promote run picks it up — no manual triage needed.
+        direct = bool(deal.get("direct_to_pipeline"))
+        if direct:
+            step_value = STEP_ADD_TO_PIPELINE
+        elif is_resurface:
+            step_value = STEP_NEW_RESURFACING
+        else:
+            step_value = STEP_NEW
+
         entry_values = _build_inbound_entry_values(
-            step=STEP_NEW_RESURFACING if is_resurface else STEP_NEW,
+            step=step_value,
             source=source,
             description=description,
             sourcer_member=sourcer_member,
@@ -393,6 +406,13 @@ def _process_one_deal(
         sector = deal.get("sector") or "?"
         stage_label = stage_for_scope or "stage ?"
         attio_url = AttioClient.company_web_url(company_id)
+        if direct:
+            tag = "(resurfacing, direct)" if is_resurface else "(direct)"
+            line = (
+                f"🚀 {company_name} {tag} · {stage_label} · "
+                f"{round_str} · {sector} ({attio_url})"
+            )
+            return {"outcome": "added", "line": line}
         if is_resurface:
             line = (
                 f"🦖 {company_name} (resurfacing) · {stage_label} · "

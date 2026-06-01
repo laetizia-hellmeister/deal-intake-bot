@@ -30,7 +30,8 @@ Schema:
       "description": string | null,
       "source": string | null,
       "sourcing_channel": string | null,
-      "geo_skip": boolean
+      "geo_skip": boolean,
+      "direct_to_pipeline": boolean
     }
   ]
 }
@@ -86,6 +87,22 @@ Rules:
   US-ness from company name, domain, or description — set this true
   only when the flag emoji is literally present immediately before
   the deal. Otherwise false / null.
+- direct_to_pipeline = true if the message contains an explicit
+  directive that these deals should bypass triage and go straight to
+  the main Deal Pipeline (skipping the usual "New → manual review"
+  step). The user is signaling they've already reached out / decided
+  to engage. Look for explicit phrases like:
+    "add to pipeline"
+    "directly to pipeline" / "direct to pipeline"
+    "skip triage"
+    "already reached out"
+    "promote this/these"
+    "#promote" / "[promote]"
+  Only set true when the phrase is clearly a DIRECTIVE about adding
+  these deals — not when discussing pipeline mechanics in passing
+  ("the founder wants to add us to their pipeline" -> false).
+  If the directive applies to the whole message, set it on every
+  deal in the array. Otherwise false / null.
 - Return only the JSON object, nothing else.
 """
 
@@ -239,6 +256,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
             data.get("sourcing_channel")
         ),
         "geo_skip": bool(data.get("geo_skip")),
+        "direct_to_pipeline": bool(data.get("direct_to_pipeline")),
     }
     return out
 
