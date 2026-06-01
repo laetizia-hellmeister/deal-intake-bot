@@ -1,0 +1,27 @@
+name: Outreach chase digest
+
+on:
+  schedule:
+    # Monday evening (17:00 Europe/Copenhagen):
+    - cron: '0 15 * * 1'   # CEST
+    - cron: '0 16 * * 1'   # CET
+    # Thursday morning (09:00 Europe/Copenhagen):
+    - cron: '0 7 * * 4'    # CEST
+    - cron: '0 8 * * 4'    # CET
+  workflow_dispatch:
+
+jobs:
+  chase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python scripts/outreach_chase.py
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}

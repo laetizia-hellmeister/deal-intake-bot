@@ -70,6 +70,22 @@ class AttioClient:
             return {}
         return r.json()
 
+    # -- generic record fetch -----------------------------------------
+
+    def get_record(self, object_slug: str, record_id: str) -> dict | None:
+        """GET /objects/{object_slug}/records/{record_id} — returns the
+        record (with values) or None if not found."""
+        if not record_id:
+            return None
+        try:
+            data = self._request(
+                "GET", f"/objects/{object_slug}/records/{record_id}"
+            )
+        except AttioError as e:
+            print(f"[attio] get_record({object_slug}, {record_id}) failed: {e}")
+            return None
+        return data.get("data")
+
     # -- companies ---------------------------------------------------------
 
     def query_companies(self, filter_: dict, limit: int = 25) -> list[dict]:
