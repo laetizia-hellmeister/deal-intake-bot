@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any
@@ -199,19 +200,30 @@ def _repair_truncated_deals_json(text: str) -> str | None:
 
 
 def extract_deals(
-    message_text: str, client: Anthropic | None = None
+    message_text: str,
+    client: Anthropic | None = None,
+    documents: list[tuple[str, bytes]] | None = None,
 ) -> list[dict[str, Any]]:
     """Send a Slack message to Claude and return a list of parsed deals.
 
     The list may have 0, 1, or more entries. Each entry has the same keys
     as the previous single-deal extractor returned. Empty list = chatter.
+
+    documents: optional list of (mime_type, file_bytes) tuples for any
+    attachments (typically PDF pitchdecks/memos). Each gets passed to
+    Claude as a document content block so it can read layout + images
+    natively — much better than parsing locally and feeding text. The
+    LLM treats the documents as additional context for deal extraction
+    alongside the Slack message text. Only mime types Claude supports
+    are forwarded; unsupported types are silently skipped.
     """
     c = client or Anthropic(api_key=ANTHROPIC_API_KEY)
+    content = _build_user_content(message_text, documents or [])
     resp = c.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=16384,  # generous — large fund-update lists can hit ~30 deals
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": message_text}],
+        messages=[{"role": "user", "content": content}],
     )
     # Concatenate all text blocks
     parts = []
@@ -276,6 +288,59 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         "assigned_user_ids": _normalize_user_ids(data.get("assigned_user_ids")),
     }
     return out
+
+
+# Anthropic claude-opus document support: PDF natively. Other types
+# (PPTX, DOCX, etc.) would need conversion or Files-API upload, which
+# we're not building yet — they're silently skipped with a log line.
+_SUPPORTED_DOC_MIMES = {"application/pdf"}
+
+
+def _build_user_content(text: str, documents: list[tuple[str, bytes]]) -> list[dict]:
+    """Build the user-message `content` array. Documents (if any) go
+    first as document content blocks; the Slack text follows.
+
+    If no documents are attached, returns a single text block so the
+    request shape stays minimal for the common case.
+    """
+    if not documents:
+        return [{"type": "text", "text": text or ""}]
+
+    blocks: list[dict] = []
+    for mime, data in documents:
+        if mime not in _SUPPORTED_DOC_MIMES:
+            print(
+                f"[extractor] skipping attachment of unsupported mime "
+                f"{mime!r} ({len(data)} bytes)"
+            )
+            continue
+        b64 = base64.standard_b64encode(data).decode("ascii")
+        blocks.append(
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": b64,
+                },
+            }
+        )
+
+    # Always include a text block after documents — when the Slack
+    # message itself has no text, prompt Claude to extract from the
+    # attachment alone.
+    blocks.append(
+        {
+            "type": "text",
+            "text": (
+                text
+                if text and text.strip()
+                else "(No text in the message — extract any deals from the "
+                "attached document(s).)"
+            ),
+        }
+    )
+    return blocks
 
 
 def _normalize_user_ids(v: Any) -> list[str]:

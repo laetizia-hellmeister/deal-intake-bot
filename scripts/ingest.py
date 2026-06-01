@@ -140,7 +140,13 @@ def _process_message(
         return
 
     try:
-        deals = extract_deals(text, client=anthro)
+        # Pitchdecks / memos attached to the message get pulled in too.
+        # Currently PDF is the only natively-supported document type;
+        # other mimes are silently skipped by the extractor.
+        documents = _download_message_documents(slack, msg)
+        had_attachment = bool(documents)
+
+        deals = extract_deals(text, client=anthro, documents=documents)
 
         # Drop items the LLM explicitly marked as not-a-deal (defensive —
         # the prompt asks for an empty array on chatter, but old shapes
@@ -183,6 +189,7 @@ def _process_message(
                     fallback_source=fallback_source,
                     inbound_index=inbound_index,
                     pipeline_index=pipeline_index,
+                    had_attachment=had_attachment,
                 )
             )
 
@@ -243,6 +250,7 @@ def _process_one_deal(
     fallback_source: str | None,
     inbound_index: dict[str, list[dict]] | None = None,
     pipeline_index: dict[str, list[dict]] | None = None,
+    had_attachment: bool = False,
 ) -> dict[str, Any]:
     """Process a single deal extracted from a Slack message.
 
@@ -387,7 +395,9 @@ def _process_one_deal(
                 raise RuntimeError("Attio did not return a company record id")
 
         source = _format_source(deal, fallback_source)
-        description = _build_inbound_description(deal, permalink)
+        description = _build_inbound_description(
+            deal, permalink, had_attachment=had_attachment
+        )
 
         # `direct_to_pipeline=true` from the extractor means the user
         # explicitly said "add to pipeline" / "skip triage" / etc. The
@@ -424,22 +434,23 @@ def _process_one_deal(
         sector = deal.get("sector") or "?"
         stage_label = stage_for_scope or "stage ?"
         attio_url = AttioClient.company_web_url(company_id)
+        deck_suffix = " 📎" if had_attachment else ""
         if direct:
             tag = "(resurfacing, direct)" if is_resurface else "(direct)"
             line = (
                 f"🚀 {company_name} {tag} · {stage_label} · "
-                f"{round_str} · {sector} ({attio_url})"
+                f"{round_str} · {sector}{deck_suffix} ({attio_url})"
             )
             return {"outcome": "added", "line": line}
         if is_resurface:
             line = (
                 f"🦖 {company_name} (resurfacing) · {stage_label} · "
-                f"{round_str} · {sector} ({attio_url})"
+                f"{round_str} · {sector}{deck_suffix} ({attio_url})"
             )
             return {"outcome": "resurfacing", "line": line}
         line = (
-            f"✅ {company_name} · {stage_label} · {round_str} · {sector} "
-            f"({attio_url})"
+            f"✅ {company_name} · {stage_label} · {round_str} · {sector}"
+            f"{deck_suffix} ({attio_url})"
         )
         return {"outcome": "added", "line": line}
 
@@ -748,7 +759,9 @@ def _build_duplicate_description(
     return "\n".join(bits)
 
 
-def _build_inbound_description(deal: dict[str, Any], permalink: str) -> str:
+def _build_inbound_description(
+    deal: dict[str, Any], permalink: str, had_attachment: bool = False
+) -> str:
     founders = deal.get("founders") or []
     founder_names = ", ".join(f["name"] for f in founders if f.get("name"))
     founder_linkedins = [
@@ -771,6 +784,8 @@ def _build_inbound_description(deal: dict[str, Any], permalink: str) -> str:
         bits.append(f"Round: {stage}{round_str}")
     elif round_size:
         bits.append(f"Round: €{round_size}M")
+    if had_attachment:
+        bits.append("📎 Pitchdeck / file attached in Slack")
     if permalink:
         bits.append(f"Slack: {permalink}")
 
@@ -779,6 +794,46 @@ def _build_inbound_description(deal: dict[str, Any], permalink: str) -> str:
     if extra:
         base = f"{extra}\n\n{base}" if base else extra
     return base
+
+
+def _download_message_documents(
+    slack: SlackClient, msg: dict
+) -> list[tuple[str, bytes]]:
+    """Fetch any file attachments on the Slack message that we can pass
+    to Claude as document blocks. Returns a list of (mime, bytes) tuples.
+
+    Currently filters to PDF only — Claude handles those natively. Other
+    types (PPTX, DOCX, images) are skipped with a log line; we can add
+    handling later if needed. Requires the bot to have the `files:read`
+    OAuth scope.
+    """
+    files = msg.get("files") or []
+    if not files:
+        return []
+    out: list[tuple[str, bytes]] = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        mime = (f.get("mimetype") or "").lower()
+        url = f.get("url_private_download") or f.get("url_private")
+        name = f.get("name", "?")
+        if mime != "application/pdf":
+            print(
+                f"[ingest] skipping attachment {name!r} — mime={mime!r} "
+                "not supported (only PDF for now)"
+            )
+            continue
+        if not url:
+            continue
+        data = slack.download_file(url)
+        if not data:
+            print(f"[ingest] failed to download attachment {name!r}")
+            continue
+        # Anthropic's per-document size cap is around 32 MB; we'll let
+        # the API reject anything bigger rather than guess thresholds.
+        print(f"[ingest] attached PDF {name!r} ({len(data)} bytes)")
+        out.append((mime, data))
+    return out
 
 
 def _fallback_source(slack: SlackClient, msg: dict) -> str | None:

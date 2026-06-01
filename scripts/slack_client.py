@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -84,6 +85,33 @@ class SlackClient:
             if e.response.get("error") == "already_reacted":
                 return
             raise
+
+    # -- file download -----------------------------------------------------
+
+    def download_file(self, url: str) -> bytes | None:
+        """Download a file from a Slack `url_private_download` (or
+        `url_private`) URL using the bot token for authentication.
+        Returns raw bytes, or None on error. Caller is responsible for
+        knowing what mime-type to expect."""
+        if not url:
+            return None
+        token = self._client.token or ""
+        try:
+            resp = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=60.0,
+                follow_redirects=True,
+            )
+        except Exception as e:
+            print(f"[slack] file download error for {url}: {e}")
+            return None
+        if resp.status_code >= 400:
+            print(
+                f"[slack] file download HTTP {resp.status_code} for {url}"
+            )
+            return None
+        return resp.content
 
     # -- permalinks --------------------------------------------------------
 
