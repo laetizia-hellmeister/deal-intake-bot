@@ -29,7 +29,8 @@ Schema:
       "sector": string | null,
       "description": string | null,
       "source": string | null,
-      "sourcing_channel": string | null
+      "sourcing_channel": string | null,
+      "geo_skip": boolean
     }
   ]
 }
@@ -78,6 +79,13 @@ Rules:
     "via [accelerator/incubator name]" -> "Accelerator / Incubator"
     "introduced by founder of [portfolio company]" -> "Portfolio Founder"
   Use null when the channel isn't clear from the message.
+- geo_skip = true ONLY if the deal entry is explicitly prefixed with a
+  US country flag emoji (🇺🇸 or the Slack shortcode :us:) directly
+  before the company name. We're a Europe-focused fund and want to
+  drop US deals; the flag emoji is the only signal. Do NOT infer
+  US-ness from company name, domain, or description — set this true
+  only when the flag emoji is literally present immediately before
+  the deal. Otherwise false / null.
 - Return only the JSON object, nothing else.
 """
 
@@ -230,6 +238,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         "sourcing_channel": _normalize_sourcing_channel(
             data.get("sourcing_channel")
         ),
+        "geo_skip": bool(data.get("geo_skip")),
     }
     return out
 

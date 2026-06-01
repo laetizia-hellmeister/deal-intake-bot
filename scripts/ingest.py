@@ -270,6 +270,14 @@ def _process_one_deal(
     ]
 
     try:
+        # Geo filter: a US flag emoji explicitly preceding the deal in
+        # Slack is a hard skip — we're Europe-focused. The LLM sets
+        # `geo_skip=true` only on lines literally prefixed with 🇺🇸
+        # or :us:, never inferred from name/domain.
+        if deal.get("geo_skip"):
+            line = f"🇺🇸 {company_name} — skipped (US, out of geo)"
+            return {"outcome": "out_of_geo", "line": line}
+
         # Out of scope only when the stage is *explicitly* Series A or later.
         # Missing / unknown stages are added with stage left blank.
         if stage_for_scope in OUT_OF_SCOPE_STAGES:
@@ -427,7 +435,7 @@ def _aggregate_reaction(outcomes: list[dict[str, Any]]) -> str:
         return REACTION_DUPLICATE
     if "passed_recent" in types:
         return REACTION_PASSED_RECENT
-    if "out_of_scope" in types:
+    if "out_of_scope" in types or "out_of_geo" in types:
         return REACTION_SKIPPED
     return REACTION_NOT_DEAL
 
