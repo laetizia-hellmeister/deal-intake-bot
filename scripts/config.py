@@ -73,6 +73,17 @@ STEP_NEW_RESURFACING = "New (resurfacing)"
 # immediately surface in the team's "do something with these" view.
 PIPELINE_DEFAULT_STAGE = "Outreach"
 
+# The sourcing_channel option for deals surfaced through a sourcing
+# database / AI sourcing tool (Evertrace, Specter, Dealroom, ...). Kept as
+# a named constant because ingest and promote both special-case it: the
+# Inbound source text carries only the tool name (no "(channel)" suffix),
+# and promote re-infers the channel from that name via SOURCING_DATABASE_TOOLS.
+DATABASE_SOURCING_CHANNEL = "Database (Evertrace, Specter, Dealroom, etc.)"
+
+# Tool names that, when they appear in the Inbound source text, imply the
+# Database sourcing channel above.
+SOURCING_DATABASE_TOOLS = ("Evertrace", "Specter", "Dealroom")
+
 # Valid `sourcing_channel` select options on Deal Pipeline. The LLM picks
 # one when the message makes the channel clear; promote.py maps the picked
 # value (case-insensitive) to one of these. Anything else is dropped.
@@ -84,7 +95,7 @@ PIPELINE_SOURCING_CHANNELS = (
     "Conference / Event",
     "LinkedIn",
     "Cold Email (Inbound)",
-    "Database (Specter, Dealroom)",
+    DATABASE_SOURCING_CHANNEL,
     "Demo Day",
     "Sector Research",
     "Accelerator / Incubator",

@@ -28,6 +28,7 @@ from anthropic import Anthropic
 from attio_client import AttioClient, AttioError
 from config import (
     ANTHROPIC_API_KEY,
+    DATABASE_SOURCING_CHANNEL,
     INBOUND_DEALS_LIST_ID,
     INGEST_LOOKBACK_SECONDS,
     INGEST_MESSAGE_LIMIT,
@@ -650,9 +651,16 @@ def _format_source(deal: dict[str, Any], fallback: str | None) -> str | None:
         "shared by Tom Smith (Angel)"
     Promote.py parses the trailing parens back out at promotion time
     to set Pipeline's sourcing_channel select attribute.
+
+    Exception: database sources (Evertrace, Specter, ...) carry only the
+    tool name, no suffix — "Evertrace" reads cleaner than a nested-parens
+    "Evertrace (Database (Evertrace, Specter, ...))", and promote re-infers
+    the channel from the tool name.
     """
     body = deal.get("source") or fallback
     channel = deal.get("sourcing_channel")
+    if body and channel == DATABASE_SOURCING_CHANNEL:
+        return body
     if body and channel:
         return f"{body} ({channel})"
     if body:

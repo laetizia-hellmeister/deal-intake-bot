@@ -23,6 +23,7 @@ from rapidfuzz import fuzz
 from attio_client import AttioClient, AttioError
 from config import (
     ATTIO_MEMBER_TO_SLACK_USER,
+    DATABASE_SOURCING_CHANNEL,
     DEAL_PIPELINE_LIST_ID,
     INBOUND_DEALS_LIST_ID,
     INVESTOR_CONTACTS,
@@ -31,6 +32,7 @@ from config import (
     PARENT_OBJECT,
     PIPELINE_DEFAULT_STAGE,
     PIPELINE_SOURCING_CHANNELS,
+    SOURCING_DATABASE_TOOLS,
     STEP_ADDED,
     STEP_DUPLICATE,
     STEP_NEW,
@@ -243,9 +245,15 @@ def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
     # Source text -> sourcing_channel + source record references.
     source_text = _extract_text(inbound_values.get("source"))
     body, channel = _parse_source_text(source_text)
+    # Database sources carry only the tool name (no "(channel)" suffix) —
+    # re-infer the channel from that name. See _format_source in ingest.py.
+    if not channel:
+        channel = _infer_database_channel(body)
     if channel and channel in PIPELINE_SOURCING_CHANNELS:
         values["sourcing_channel"] = [channel]
-    if body:
+    # A database tool isn't a person or company, so there's nothing to
+    # match against People / Companies — set the channel and stop there.
+    if body and channel != DATABASE_SOURCING_CHANNEL:
         source_refs = _match_source_records(attio, body, channel)
         if source_refs:
             values["source"] = source_refs
@@ -285,6 +293,18 @@ def _parse_source_text(text: str | None) -> tuple[str | None, str | None]:
         channel = m.group(2).strip() or None
         return body, channel
     return text, None
+
+
+def _infer_database_channel(body: str | None) -> str | None:
+    """A bare sourcing-tool name in the source body (e.g. "Evertrace")
+    implies the Database sourcing channel. Ingest drops the "(channel)"
+    suffix for these, so this is how promote recovers the channel."""
+    if not body:
+        return None
+    low = body.lower()
+    if any(tool.lower() in low for tool in SOURCING_DATABASE_TOOLS):
+        return DATABASE_SOURCING_CHANNEL
+    return None
 
 
 # Channel-specific lookup strategies. Each set determines which lookup

@@ -64,10 +64,13 @@ Rules:
   LinkedIn page is mentioned.
 - source = who shared this deal, e.g. "Hillary from TestCo VC", "shared by
   Tom Smith". If the source is stated once at the top of a multi-deal
-  message, copy it onto each deal. null if not stated.
+  message, copy it onto each deal. If the deal was surfaced through a
+  sourcing database / AI sourcing tool (Evertrace, Specter, Dealroom),
+  set source to just the tool name, e.g. "Evertrace". null if not stated.
 - sourcing_channel = the channel this deal came in through. Pick one of:
   "VC", "Angel", "Personal Network", "Demo Day", "Conference / Event",
-  "LinkedIn", "Cold Email (Inbound)", "Database (Specter, Dealroom)",
+  "LinkedIn", "Cold Email (Inbound)",
+  "Database (Evertrace, Specter, Dealroom, etc.)",
   "Sector Research", "Accelerator / Incubator", "University",
   "Founder Network", "Portfolio Founder", "Advisory / Broker Firm",
   "Ecosystem / AI Campus", "Active Sourcing".
@@ -75,6 +78,8 @@ Rules:
     "Hillary from TestCo VC" -> "VC"
     "Tom Smith, an angel investor" / "this angel shared" -> "Angel"
     "my friend John mentioned" / "via personal contact" -> "Personal Network"
+    "sourced via Evertrace" / "from Specter" / "found on Dealroom"
+      -> "Database (Evertrace, Specter, Dealroom, etc.)"
     "saw at the AI Demo Day" / "from XYZ demo day" -> "Demo Day"
     "from a LinkedIn DM" / "via LinkedIn" -> "LinkedIn"
     "cold email from..." / "inbound from..." -> "Cold Email (Inbound)"
