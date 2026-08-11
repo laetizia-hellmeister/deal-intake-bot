@@ -29,6 +29,16 @@ class SlackClient:
 
     # -- reading -----------------------------------------------------------
 
+    def fetch_thread_replies(self, thread_ts: str) -> list[dict]:
+        """Return every message in a thread (root first, then replies in ts
+        order) via conversations.replies. `conversations_history` does NOT
+        reliably surface plain (non-broadcast) thread replies, so this is a
+        separate call rather than reusing fetch_recent_messages."""
+        resp = self._client.conversations_replies(
+            channel=self.channel_id, ts=thread_ts
+        )
+        return resp.get("messages", []) or []
+
     def fetch_recent_messages(self, lookback_seconds: int, limit: int) -> list[dict]:
         """Return messages from the channel, newest first, within lookback window."""
         # Slack's `oldest` expects a Unix timestamp formatted as
@@ -57,9 +67,11 @@ class SlackClient:
         return bool(thread_ts and thread_ts != msg.get("ts"))
 
     @staticmethod
-    def has_processed_reaction(msg: dict) -> bool:
+    def has_processed_reaction(
+        msg: dict, reactions: set[str] = PROCESSED_REACTIONS
+    ) -> bool:
         for r in msg.get("reactions") or []:
-            if r.get("name") in PROCESSED_REACTIONS:
+            if r.get("name") in reactions:
                 return True
         return False
 
