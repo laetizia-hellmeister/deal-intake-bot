@@ -604,22 +604,9 @@ def _lookup_person_in_team(
 
 
 def _company_team_ids(company_record: dict) -> set[str]:
-    """Extract the set of team-member Person record_ids from a Company."""
-    values = company_record.get("values") or {}
-    team = values.get("team") or []
-    if not isinstance(team, list):
-        return set()
-    out: set[str] = set()
-    for ref in team:
-        if not isinstance(ref, dict):
-            continue
-        rid = ref.get("target_record_id")
-        if not rid:
-            inner = ref.get("target") or {}
-            rid = inner.get("record_id")
-        if rid:
-            out.add(rid)
-    return out
+    """Extract the set of team-member Person record_ids from a Company.
+    Delegates to AttioClient, which also serves outreach_chase.py."""
+    return AttioClient.company_team_ids(company_record)
 
 
 def _first_token(s: str) -> str | None:

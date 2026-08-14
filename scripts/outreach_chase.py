@@ -1,21 +1,26 @@
-"""Twice-weekly digest of stale Outreach deals, posted to Slack.
+"""Daily two-way digest of the Outreach-chase funnel, posted to Slack.
 
-Runs Monday evening (17:00 Europe/Copenhagen) and Thursday morning
-(09:00 local). Finds Deal Pipeline entries with status = "Outreach"
-that were added more than OUTREACH_STALE_DAYS calendar days ago and
-groups them by first Deal Lead. Posts a single Slack message in
-the bot's channel @-mentioning each lead with their stale list.
+Phase 1 (process_pending_replies, in outreach_replies.py): apply any of
+Laetizia's thread replies to prior digests to Attio — advancing a deal's
+stage, logging a chase, or passing it — before building the next digest.
+A failure here is logged and reported but never blocks Phase 2.
 
-Hour-window gating is deliberately loose — GitHub Actions cron
-drifts by 1-2 hours on busy days. We gate on weekday + Slack-history
-dedupe instead: if it's Mon or Thu and we haven't already posted
-today's digest, post.
+Phase 2 (this file): scan the Deal Pipeline for entries due for their next
+outreach action (Follow Up 1, Follow Up 2, Partner Attempt/Warm Intro, or
+"consider passing" if stuck at Partner Attempt/Warm Intro 7+ days), and
+post a single Slack message grouped by Deal Lead (so colleagues still get
+@-mentioned about their own stale deals), then by action-type within each
+lead's section. Runs daily; hour-window gating is deliberately loose (GitHub
+Actions cron drifts by 1-2 hours on busy days) — we gate on same-day
+Slack-history dedupe instead: if we haven't already posted today's digest,
+post.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import traceback
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -24,53 +29,66 @@ from attio_client import AttioClient, AttioError
 from config import (
     ATTIO_MEMBER_TO_SLACK_USER,
     DEAL_PIPELINE_LIST_ID,
+    DIGEST_MARKER,
+    OUTREACH_INITIAL_DAYS,
     PARENT_OBJECT,
+    PARTNER_NUDGE_DAYS,
+    STAGE_FOLLOW_UP_1,
+    STAGE_FOLLOW_UP_2,
+    STAGE_OUTREACH,
+    STAGE_PARTNER_WARM_INTRO,
 )
+from outreach_replies import process_pending_replies
 from slack_client import SlackClient
 
-OUTREACH_STAGE = "Outreach"
-# Minimum calendar days in Outreach before a deal shows up in the digest.
-# Deals at exactly this many days are shown in the first bucket; the bucket
-# boundary is hard-coded in _format_digest (6-10 vs >10).
-OUTREACH_STALE_DAYS = 6
-DIGEST_MARKER = "🐢 Outreach follow-ups"
+_SECTION_ORDER = [
+    ("due_fu1", "Due for Follow Up 1"),
+    ("due_fu2", "Due for Follow Up 2"),
+    ("due_partner", "Due for Partner Attempt/Warm Intro"),
+    (
+        "consider_passing",
+        "⚠️ 7+ days at Partner Attempt/Warm Intro — consider passing",
+    ),
+]
 
 
 def main() -> int:
     is_manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     now_local = datetime.now(ZoneInfo("Europe/Copenhagen"))
-    weekday = now_local.weekday()  # 0=Mon … 6=Sun
-
-    # Mon = 0, Thu = 3. Cron-triggered runs only fire those days; manual
-    # runs always go through.
-    if not is_manual and weekday not in (0, 3):
-        print(
-            f"Skipping — weekday is {weekday} (need Mon=0 or Thu=3) "
-            f"and not a manual run"
-        )
-        return 0
 
     slack = SlackClient()
+    attio = AttioClient()
+
+    # Phase 1 — apply pending replies. Runs every fire (daily), never
+    # weekday-gated, and never blocks Phase 2 below.
+    try:
+        process_pending_replies(slack, attio)
+    except Exception as e:
+        print(f"[replies] phase failed, continuing to digest: {e}")
+        traceback.print_exc()
+        try:
+            slack.post_message(f"⚠️ Outreach reply-processing crashed: {_short(e)}")
+        except Exception:
+            pass
+
+    # Phase 2 — digest posting.
     if not is_manual and _digest_already_posted_today(slack, now_local):
         print("Skipping — outreach digest already posted today")
+        attio.close()
         return 0
 
-    attio = AttioClient()
     try:
-        stale = _find_stale_outreach_entries(attio)
+        buckets = _scan_pipeline_entries(attio)
     except Exception as e:
-        print(f"Failed to fetch stale Outreach entries: {e}")
+        print(f"Failed to scan Deal Pipeline entries: {e}")
         attio.close()
         return 1
 
-    if not stale:
-        print("No stale Outreach deals — skipping post")
+    text = _format_digest(buckets, attio, now_local)
+    if not text:
+        print("No due Outreach-funnel deals — skipping post")
         attio.close()
         return 0
-
-    grouped = _group_by_first_deal_lead(stale)
-    enriched = _enrich_with_company_names(attio, grouped)
-    text = _format_digest(enriched, now_local)
 
     try:
         slack.post_message(text)
@@ -79,28 +97,20 @@ def main() -> int:
         attio.close()
         return 1
 
-    total = sum(len(items) for items in grouped.values())
-    print(
-        f"Posted Outreach chase digest covering {total} stale deal(s) "
-        f"across {len(grouped)} lead bucket(s)."
-    )
+    print("Posted Outreach chase digest.")
     attio.close()
     return 0
 
 
 # ---------------------------------------------------------------------
-# Querying + filtering
+# Querying + bucketing
 # ---------------------------------------------------------------------
 
-def _find_stale_outreach_entries(attio: AttioClient) -> list[dict]:
-    """All Deal Pipeline entries whose Status is Outreach AND whose
-    created_at is older than OUTREACH_STALE_DAYS calendar days.
-
-    We paginate unfiltered (the bot's filter syntax doesn't reliably
-    match parent_record_id; we use the same client-side filter pattern
-    here for robustness) and filter on both fields locally."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=OUTREACH_STALE_DAYS)
-    stale: list[dict] = []
+def _scan_pipeline_entries(attio: AttioClient) -> dict[str, list[dict]]:
+    """One paginated pass over the Deal Pipeline list, bucketed by which
+    digest section (if any) an entry belongs in."""
+    now = datetime.now(timezone.utc)
+    buckets: dict[str, list[dict]] = {key: [] for key, _ in _SECTION_ORDER}
     offset = 0
     PAGE_SIZE = 500
     MAX_SCAN = 50_000
@@ -108,8 +118,7 @@ def _find_stale_outreach_entries(attio: AttioClient) -> list[dict]:
     while scanned < MAX_SCAN:
         try:
             page = attio.query_list_entries(
-                DEAL_PIPELINE_LIST_ID, filter_=None,
-                limit=PAGE_SIZE, offset=offset,
+                DEAL_PIPELINE_LIST_ID, filter_=None, limit=PAGE_SIZE, offset=offset
             )
         except AttioError as e:
             print(f"[chase] failed page at offset {offset}: {e}")
@@ -117,72 +126,38 @@ def _find_stale_outreach_entries(attio: AttioClient) -> list[dict]:
         if not page:
             break
         for entry in page:
-            if _entry_stage(entry) != OUTREACH_STAGE:
-                continue
-            ts = _entry_created_at(entry)
-            if not ts:
-                continue
-            if ts >= cutoff:
-                continue
-            stale.append(entry)
+            _bucket_entry(entry, buckets, now)
         scanned += len(page)
         if len(page) < PAGE_SIZE:
             break
         offset += PAGE_SIZE
-    return stale
+    return buckets
 
 
-def _entry_stage(entry: dict) -> str | None:
-    """Pull the Status (api_slug `stage`) title from a Pipeline entry."""
-    ev = (entry or {}).get("entry_values") or {}
-    raw = ev.get("stage")
-    if not raw:
-        return None
-    if isinstance(raw, list):
-        raw = raw[0] if raw else None
-    if not isinstance(raw, dict):
-        return None
-    inner = raw.get("status")
-    if isinstance(inner, dict):
-        return inner.get("title") or inner.get("name")
-    return raw.get("title") or raw.get("value")
+def _bucket_entry(entry: dict, buckets: dict[str, list[dict]], now: datetime) -> None:
+    stage = AttioClient.entry_status_value(entry, "stage")
+    if stage == STAGE_OUTREACH:
+        if AttioClient.entry_date_value(entry, "last_chased") is not None:
+            return  # already chased once but stage wasn't advanced — leave alone
+        created = AttioClient.entry_created_at(entry)
+        if created and (now - created).days >= OUTREACH_INITIAL_DAYS:
+            buckets["due_fu1"].append(entry)
+    elif stage == STAGE_FOLLOW_UP_1:
+        rd = AttioClient.entry_date_value(entry, "review_date")
+        if rd is None or rd <= now.date():
+            buckets["due_fu2"].append(entry)
+    elif stage == STAGE_FOLLOW_UP_2:
+        rd = AttioClient.entry_date_value(entry, "review_date")
+        if rd is None or rd <= now.date():
+            buckets["due_partner"].append(entry)
+    elif stage == STAGE_PARTNER_WARM_INTRO:
+        anchor = AttioClient.entry_date_value(entry, "last_chased")
+        if anchor is None:
+            created = AttioClient.entry_created_at(entry)
+            anchor = created.date() if created else None
+        if anchor and (now.date() - anchor).days >= PARTNER_NUDGE_DAYS:
+            buckets["consider_passing"].append(entry)
 
-
-def _entry_created_at(entry: dict) -> datetime | None:
-    """Pull a UTC datetime from a list entry's created_at."""
-    raw = (entry or {}).get("created_at")
-    if not raw:
-        raw = ((entry or {}).get("entry_values") or {}).get("created_at")
-    iso = _first_text_value(raw)
-    if not iso:
-        return None
-    s = iso.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _first_text_value(v) -> str | None:
-    if not v:
-        return None
-    if isinstance(v, str):
-        return v
-    if isinstance(v, list) and v:
-        return _first_text_value(v[0])
-    if isinstance(v, dict):
-        return v.get("value") or v.get("formatted")
-    return None
-
-
-# ---------------------------------------------------------------------
-# Grouping + formatting
-# ---------------------------------------------------------------------
 
 def _group_by_first_deal_lead(entries: list[dict]) -> dict[str | None, list[dict]]:
     """Group entries by their first Deal Lead's Attio member id."""
@@ -200,102 +175,104 @@ def _group_by_first_deal_lead(entries: list[dict]) -> dict[str | None, list[dict
     return grouped
 
 
-def _enrich_with_company_names(
-    attio: AttioClient, grouped: dict[str | None, list[dict]]
-) -> dict[str | None, list[dict]]:
-    """Fetch the company name + days-in-Outreach for each entry.
-    Returns {lead_id: [{name, days}, ...]}. No URLs — display is tabular
-    and links would break the code-block alignment."""
-    out: dict[str | None, list[dict]] = {}
-    now = datetime.now(timezone.utc)
-    for lead_id, entries in grouped.items():
-        items: list[dict] = []
-        for entry in entries:
-            company_id = AttioClient.parent_record_id(entry)
-            name = "unknown"
-            if company_id:
-                record = attio.get_record(PARENT_OBJECT, company_id)
-                if record:
-                    name = AttioClient.company_name(record) or f"company:{company_id[:8]}"
-                else:
-                    name = f"company:{company_id[:8]}"
-            ts = _entry_created_at(entry)
-            days = (now - ts).days if ts else None
-            items.append({"name": name, "days": days})
-        items.sort(key=lambda x: (-(x["days"] or 0), x["name"].lower()))
-        out[lead_id] = items
-    return out
+# ---------------------------------------------------------------------
+# Enrichment + formatting
+# ---------------------------------------------------------------------
 
-
-# Column widths for the code-block table inside each lead's section.
-_NAME_COL_WIDTH = 32
-_DAYS_COL_WIDTH = 8
+def _enrich_entry(attio: AttioClient, entry: dict, now: datetime) -> dict:
+    company_id = AttioClient.parent_record_id(entry)
+    company_name = "unknown"
+    person_name = None
+    linkedin_url = None
+    if company_id:
+        record = attio.get_record(PARENT_OBJECT, company_id)
+        if record:
+            company_name = AttioClient.company_name(record) or f"company:{company_id[:8]}"
+            team_ids = AttioClient.company_team_ids(record)
+            if team_ids:
+                person = attio.get_record("people", next(iter(team_ids)))
+                if person:
+                    person_name = AttioClient.person_name(person)
+                    linkedin_url = AttioClient.person_linkedin(person)
+        else:
+            company_name = f"company:{company_id[:8]}"
+    created = AttioClient.entry_created_at(entry)
+    days = (now - created).days if created else None
+    next_steps = AttioClient.entry_text_value(entry, "next_steps")
+    return {
+        "entry_id": AttioClient.entry_id(entry),
+        "company": company_name,
+        "person": person_name,
+        "linkedin": linkedin_url,
+        "days": days,
+        "next_steps": next_steps if next_steps and len(next_steps) <= 80 else None,
+    }
 
 
 def _format_digest(
-    enriched: dict[str | None, list[dict]],
-    now_local: datetime,
+    buckets: dict[str, list[dict]], attio: AttioClient, now_local: datetime
 ) -> str:
-    """Build the Slack message — one section per Deal Lead with a
-    monospace code-block table grouped into two staleness buckets:
-      6–10 days  (gentle nudge)
-      >10 days  (critical — warm intro or pass)
+    now_utc = datetime.now(timezone.utc)
 
-    Each lead's @-mention sits *outside* the code block so Slack
-    notifications fire; the table itself is inside ``` fences for
-    clean alignment without link clutter."""
-    when = "morning" if now_local.hour < 14 else "evening"
+    # Invert to {lead_id: {bucket_key: [entries]}}, preserving section order.
+    by_lead: dict[str | None, dict[str, list[dict]]] = defaultdict(dict)
+    total_by_lead: dict[str | None, int] = defaultdict(int)
+    for key, _ in _SECTION_ORDER:
+        for lead_id, entries in _group_by_first_deal_lead(buckets.get(key) or []).items():
+            by_lead[lead_id][key] = entries
+            total_by_lead[lead_id] += len(entries)
+
+    if not by_lead:
+        return ""
+
+    when = "morning" if now_local.hour < 14 else "afternoon"
     lines = [f"{DIGEST_MARKER} ({when} chase)"]
-
-    # Sort buckets: most total stale-deals first; unassigned last.
-    items = sorted(
-        enriched.items(),
-        key=lambda kv: (kv[0] is None, -len(kv[1])),
-    )
-    for lead_id, deals in items:
-        bucket_mid = [d for d in deals if d["days"] is not None and 6 <= d["days"] <= 10]
-        bucket_crit = [d for d in deals if d["days"] is not None and d["days"] > 10]
-        if not bucket_mid and not bucket_crit:
-            continue
-
+    lead_order = sorted(by_lead.keys(), key=lambda lid: (lid is None, -total_by_lead[lid]))
+    counter = 1
+    for lead_id in lead_order:
         if lead_id is None:
             mention = "_unassigned_"
         else:
             slack_uid = ATTIO_MEMBER_TO_SLACK_USER.get(lead_id)
             mention = f"<@{slack_uid}>" if slack_uid else "_unmapped_"
-
         lines.append("")
         lines.append(mention)
+        for key, title in _SECTION_ORDER:
+            entries = by_lead[lead_id].get(key) or []
+            if not entries:
+                continue
+            enriched = [_enrich_entry(attio, e, now_utc) for e in entries]
+            enriched.sort(key=lambda x: -(x["days"] or 0))
+            lines.append(f"*{title}*")
+            for row in enriched:
+                lines.append(_format_row(counter, row))
+                if row["next_steps"]:
+                    lines.append(f"   _{row['next_steps']}_")
+                counter += 1
 
-        table_lines = ["```"]
-        if bucket_mid:
-            table_lines.append("6–10 days")
-            for d in sorted(bucket_mid, key=lambda x: -x["days"]):
-                table_lines.append(_format_row(d["name"], d["days"]))
-        if bucket_crit:
-            if bucket_mid:
-                table_lines.append("")
-            table_lines.append(">10 days  (critical — warm intro or pass)")
-            for d in sorted(bucket_crit, key=lambda x: -x["days"]):
-                table_lines.append(_format_row(d["name"], d["days"]))
-        table_lines.append("```")
-        lines.extend(table_lines)
+    lines.append("")
+    lines.append('Reply in this thread, e.g. "1 followed up 2 pass 3 skip"')
     return "\n".join(lines)
 
 
-def _format_row(name: str, days: int) -> str:
-    """One table row, padded so the days column aligns."""
-    safe_name = name if len(name) <= _NAME_COL_WIDTH else name[: _NAME_COL_WIDTH - 1] + "…"
-    return f"  {safe_name.ljust(_NAME_COL_WIDTH)}{str(days).rjust(3)} days"
+def _format_row(num: int, row: dict) -> str:
+    header = f"*{row['company']}*"
+    if row["person"]:
+        header += f" — {row['person']}"
+    bits = [header]
+    if row["days"] is not None:
+        bits.append(f"{row['days']}d waiting")
+    if row["linkedin"]:
+        bits.append(f"<{row['linkedin']}|LinkedIn ↗>")
+    line = f"{num}. " + " · ".join(bits)
+    return f"{line}  `id:{row['entry_id']}`"
 
 
 # ---------------------------------------------------------------------
 # Slack-history dedupe
 # ---------------------------------------------------------------------
 
-def _digest_already_posted_today(
-    slack: SlackClient, now_local: datetime
-) -> bool:
+def _digest_already_posted_today(slack: SlackClient, now_local: datetime) -> bool:
     """True if the bot already posted today's outreach-chase digest."""
     today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     seconds_today = int((now_local - today_start).total_seconds()) + 60
@@ -313,6 +290,11 @@ def _digest_already_posted_today(
         if DIGEST_MARKER in text:
             return True
     return False
+
+
+def _short(e: Exception, n: int = 160) -> str:
+    s = str(e)
+    return s if len(s) <= n else s[: n - 1] + "…"
 
 
 if __name__ == "__main__":

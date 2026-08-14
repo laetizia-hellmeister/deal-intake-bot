@@ -6,6 +6,7 @@ Only the endpoints the bot actually needs are implemented.
 from __future__ import annotations
 
 import time
+from datetime import date, datetime, timezone
 from typing import Any, Iterable
 
 import httpx
@@ -318,6 +319,17 @@ class AttioClient:
         )
         return data.get("data", {})
 
+    def get_list_entry_by_id(self, list_id: str, entry_id: str) -> dict | None:
+        """Fetch a single list entry by its own entry_id. `entry_id` is a
+        real, unique, queryable text attribute on every list entry (unlike
+        `parent_record_id`, which is entry-level metadata that Attio's
+        filter silently ignores — see find_list_entries_for_company's
+        docstring) so a plain filtered query is reliable here."""
+        matches = self.query_list_entries(
+            list_id, filter_={"entry_id": entry_id}, limit=1
+        )
+        return matches[0] if matches else None
+
     # -- convenience -------------------------------------------------------
 
     def inbound_deals_entries_to_promote(self, limit: int = 50) -> list[dict]:
@@ -381,3 +393,106 @@ class AttioClient:
     def company_web_url(record_id: str) -> str:
         """User-facing Attio URL for a company record."""
         return f"https://app.attio.com/_/objects/companies/record/{record_id}"
+
+    @staticmethod
+    def person_linkedin(record: dict) -> str | None:
+        """Mirrors company_linkedin, for a Person record."""
+        values = (record or {}).get("values") or {}
+        items = values.get("linkedin") or []
+        if items and isinstance(items, list):
+            return items[0].get("value")
+        return None
+
+    @staticmethod
+    def company_team_ids(company_record: dict) -> set[str]:
+        """Extract the set of team-member Person record_ids from a Company.
+        Shared by promote.py (matching a shared VC's mentioned contact
+        against a company's team) and outreach_chase.py (resolving a
+        company's linked founder for the digest's LinkedIn link)."""
+        values = (company_record or {}).get("values") or {}
+        team = values.get("team") or []
+        if not isinstance(team, list):
+            return set()
+        out: set[str] = set()
+        for ref in team:
+            if not isinstance(ref, dict):
+                continue
+            rid = ref.get("target_record_id")
+            if not rid:
+                inner = ref.get("target") or {}
+                rid = inner.get("record_id")
+            if rid:
+                out.add(rid)
+        return out
+
+    # -- list entry read-shape helpers --------------------------------------
+    # Generic readers for a list entry's `entry_values`. Attio's read shape
+    # differs by attribute type (status/select wrap the value in
+    # {"status"/"option": {...}}, plain text/date attributes are simpler),
+    # so these centralize the parsing that used to be duplicated per-script.
+
+    @staticmethod
+    def _first_text(v: Any) -> str | None:
+        if not v:
+            return None
+        if isinstance(v, str):
+            return v.strip() or None
+        if isinstance(v, list) and v:
+            return AttioClient._first_text(v[0])
+        if isinstance(v, dict):
+            return v.get("value") or v.get("formatted") or None
+        return None
+
+    @staticmethod
+    def entry_text_value(entry: dict, slug: str) -> str | None:
+        """Plain-text field reader, e.g. for `next_steps`."""
+        values = (entry or {}).get("entry_values") or {}
+        return AttioClient._first_text(values.get(slug))
+
+    @staticmethod
+    def entry_status_value(entry: dict, slug: str = "stage") -> str | None:
+        """Status/select field reader, e.g. for `stage`. Read shape is
+        `[{"status": {"title": "..."}}]` (status attrs) or
+        `[{"option": {"title": "..."}}]` (plain select attrs)."""
+        values = (entry or {}).get("entry_values") or {}
+        raw = values.get(slug)
+        if isinstance(raw, list):
+            raw = raw[0] if raw else None
+        if not isinstance(raw, dict):
+            return None
+        inner = raw.get("status") or raw.get("option")
+        if isinstance(inner, dict):
+            return inner.get("title") or inner.get("name")
+        return raw.get("title") or raw.get("value")
+
+    @staticmethod
+    def entry_date_value(entry: dict, slug: str) -> date | None:
+        """Date field reader, e.g. for `last_chased` / `review_date`."""
+        text = AttioClient.entry_text_value(entry, slug)
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def entry_created_at(entry: dict) -> datetime | None:
+        """The list entry's own `created_at` metadata (when it was added
+        to the list) — a UTC-aware datetime, or None."""
+        raw = (entry or {}).get("created_at")
+        if not raw:
+            raw = ((entry or {}).get("entry_values") or {}).get("created_at")
+        text = AttioClient._first_text(raw)
+        if not text:
+            return None
+        s = text.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)

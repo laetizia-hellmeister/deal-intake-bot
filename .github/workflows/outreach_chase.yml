@@ -2,12 +2,9 @@ name: Outreach chase digest
 
 on:
   schedule:
-    # Monday evening (17:00 Europe/Copenhagen):
-    - cron: '0 15 * * 1'   # CEST
-    - cron: '0 16 * * 1'   # CET
-    # Thursday morning (09:00 Europe/Copenhagen):
-    - cron: '0 7 * * 4'    # CEST
-    - cron: '0 8 * * 4'    # CET
+    # Daily afternoon (17:00 Europe/Copenhagen):
+    - cron: '0 15 * * *'   # CEST
+    - cron: '0 16 * * *'   # CET
   workflow_dispatch:
 
 jobs:

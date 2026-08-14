@@ -35,6 +35,21 @@ PROCESSED_REACTIONS = {
     REACTION_ERROR,
 }
 
+# Reactions used to mark a reply to the outreach-chase digest as processed
+# (distinct set from PROCESSED_REACTIONS above, which is about ingest's
+# top-level-message dedupe — these apply to thread replies instead).
+REACTION_REPLY_APPLIED = "white_check_mark"    # ✅ at least one item was applied to Attio
+REACTION_REPLY_SKIPPED = "fast_forward"        # ⏭️ every item in the reply was "skip"
+REACTION_REPLY_CLARIFY = "grey_question"       # ❓ needs clarification — nothing applied
+REACTION_REPLY_ERROR = REACTION_ERROR          # ⚠️ a write failed / unhandled exception
+
+REPLY_PROCESSED_REACTIONS = {
+    REACTION_REPLY_APPLIED,
+    REACTION_REPLY_SKIPPED,
+    REACTION_REPLY_CLARIFY,
+    REACTION_REPLY_ERROR,
+}
+
 # --- Attio ---
 ATTIO_API_BASE = "https://api.attio.com/v2"
 
@@ -72,6 +87,50 @@ STEP_NEW_RESURFACING = "New (resurfacing)"
 # Intro Call, etc. We default to Outreach so that promoted deals
 # immediately surface in the team's "do something with these" view.
 PIPELINE_DEFAULT_STAGE = "Outreach"
+
+# --- Outreach chase funnel (a sub-sequence of `stage`, not a separate field) ---
+# These titles must match the Deal Pipeline "Status" option titles exactly —
+# note the stray space before "Warm" in the Partner Attempt option, that's
+# intentional, copied verbatim from Attio.
+STAGE_OUTREACH = "Outreach"
+STAGE_FOLLOW_UP_1 = "Follow Up 1"
+STAGE_FOLLOW_UP_2 = "Follow Up 2"
+STAGE_PARTNER_WARM_INTRO = "Partner Attempt/ Warm Intro"
+STAGE_TO_PASS = "To Pass"
+
+OUTREACH_FUNNEL_STAGES = {
+    STAGE_OUTREACH,
+    STAGE_FOLLOW_UP_1,
+    STAGE_FOLLOW_UP_2,
+    STAGE_PARTNER_WARM_INTRO,
+}
+
+OUTREACH_INITIAL_DAYS = 3      # Outreach -> due for Follow Up 1
+FOLLOW_UP_CADENCE_DAYS = 3     # review_date = last_chased + this, while chasing FU1/FU2
+PARTNER_NUDGE_DAYS = 7         # "consider passing" nudge threshold at Partner Attempt/Warm Intro
+
+# Marker text identifying an outreach-chase digest post, used both for
+# same-day dedupe (outreach_chase.py) and to find prior digest threads to
+# check for replies (outreach_replies.py). Centralized here (rather than
+# living in outreach_chase.py) so both modules can import it without a
+# circular import between them.
+DIGEST_MARKER = "🐢 Outreach follow-ups"
+
+# First names used to detect "tried via <colleague>" as a Partner
+# Attempt/Warm Intro signal in reply_parser.py — e.g. "tried via Adrian" or
+# "via Rasmus" both mean partner attempt, not just the literal word
+# "partner". Kept as an explicit list (rather than derived from the dict
+# below) since matching needs first names, not Slack/Attio IDs.
+COLLEAGUE_FIRST_NAMES = (
+    "Laetizia",
+    "Pranav",
+    "Shrey",
+    "Matilda",
+    "Rockman",
+    "Adrian",
+    "Rasmus",
+    "Nicole",
+)
 
 # The sourcing_channel option for deals surfaced through a sourcing
 # database / AI sourcing tool (Evertrace, Specter, Dealroom, ...). Kept as
