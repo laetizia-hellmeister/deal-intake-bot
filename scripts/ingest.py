@@ -23,11 +23,10 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any
 
-from anthropic import Anthropic
+import httpx
 
 from attio_client import AttioClient, AttioError
 from config import (
-    ANTHROPIC_API_KEY,
     DATABASE_SOURCING_CHANNEL,
     INBOUND_DEALS_LIST_ID,
     INGEST_LOOKBACK_SECONDS,
@@ -50,7 +49,7 @@ from config import (
     STEP_PASSED_RECENT,
 )
 from dedupe import find_duplicate, location_label, _first_significant_token
-from extractor import extract_deals
+from extractor import build_client, extract_deals
 from rapidfuzz import fuzz
 from slack_client import SlackClient
 
@@ -58,7 +57,7 @@ from slack_client import SlackClient
 def main() -> int:
     slack = SlackClient()
     attio = AttioClient()
-    anthro = Anthropic(api_key=ANTHROPIC_API_KEY)
+    llm_client = build_client()
 
     try:
         messages = slack.fetch_recent_messages(
@@ -68,6 +67,7 @@ def main() -> int:
     except Exception as e:
         print(f"Failed to fetch Slack messages: {e}")
         attio.close()
+        llm_client.close()
         return 1
 
     # Oldest first, so reactions appear in chronological order
@@ -111,7 +111,7 @@ def main() -> int:
         _process_message(
             slack,
             attio,
-            anthro,
+            llm_client,
             msg,
             inbound_index=inbound_index,
             pipeline_index=pipeline_index,
@@ -123,13 +123,14 @@ def main() -> int:
         f"skipped {skipped_already} already-reacted, of {len(messages)} fetched."
     )
     attio.close()
+    llm_client.close()
     return 0
 
 
 def _process_message(
     slack: SlackClient,
     attio: AttioClient,
-    anthro: Anthropic,
+    llm_client: httpx.Client,
     msg: dict,
     *,
     inbound_index: dict[str, list[dict]] | None = None,
@@ -147,7 +148,7 @@ def _process_message(
         documents = _download_message_documents(slack, msg)
         had_attachment = bool(documents)
 
-        deals = extract_deals(text, client=anthro, documents=documents)
+        deals = extract_deals(text, client=llm_client, documents=documents)
 
         # Drop items the LLM explicitly marked as not-a-deal (defensive —
         # the prompt asks for an empty array on chatter, but old shapes
@@ -837,8 +838,8 @@ def _download_message_documents(
         if not data:
             print(f"[ingest] failed to download attachment {name!r}")
             continue
-        # Anthropic's per-document size cap is around 32 MB; we'll let
-        # the API reject anything bigger rather than guess thresholds.
+        # OpenRouter's per-request body size cap is generous; we'll let
+        # the API reject anything too big rather than guess thresholds.
         print(f"[ingest] attached PDF {name!r} ({len(data)} bytes)")
         out.append((mime, data))
     return out

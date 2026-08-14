@@ -4,7 +4,7 @@ A Slack bot that processes deal messages from `#deal-intake` and stages them in 
 
 ## What it does
 
-- **Ingest (every 5 min):** polls the Slack channel, parses new deal messages with Claude, checks scope (Angel/Pre-seed/Seed only), fuzzy-matches against existing Attio companies, and either skips, flags as duplicate, or stages in the **Inbound Deals** list. Uses Slack reactions (✅ ⏭️ 🔁 🤷 ⚠️) to track processed state — no database needed.
+- **Ingest (every 5 min):** polls the Slack channel, parses new deal messages with an LLM (via OpenRouter), checks scope (Angel/Pre-seed/Seed only), fuzzy-matches against existing Attio companies, and either skips, flags as duplicate, or stages in the **Inbound Deals** list. Uses Slack reactions (✅ ⏭️ 🔁 🤷 ⚠️) to track processed state — no database needed.
 - **Promote (daily 17:00 Europe/Copenhagen):** moves any Inbound Deals entries marked `Add to pipeline` into the main **Deal Pipeline** list and flips their step to `Added`.
 
 ## Setup
@@ -17,7 +17,7 @@ A Slack bot that processes deal messages from `#deal-intake` and stages them in 
 
 2. **GitHub secrets** (Settings → Secrets and variables → Actions):
    - `SLACK_BOT_TOKEN` — `xoxb-...`
-   - `ANTHROPIC_API_KEY` — `sk-ant-...`
+   - `OPENROUTER_API_KEY` — `sk-or-v1-...`
    - `ATTIO_API_KEY` — Attio access token
 
 3. **Enable workflows** under the Actions tab after manual testing passes.
@@ -43,7 +43,7 @@ Do NOT enable cron until these seven steps pass via `workflow_dispatch`:
 scripts/
   ingest.py         # ingest entry point
   promote.py        # promote entry point
-  extractor.py      # Claude prompt + JSON parsing
+  extractor.py      # LLM prompt (OpenRouter) + JSON parsing
   attio_client.py   # Attio API wrapper
   slack_client.py   # Slack helpers
   dedupe.py         # fuzzy matching

@@ -1,4 +1,9 @@
-"""Claude-based extraction of structured deal info from a Slack message."""
+"""LLM-based extraction of structured deal info from a Slack message.
+
+Calls the model via OpenRouter's OpenAI-compatible chat-completions
+endpoint (not the Anthropic Messages API) — see `build_client()` /
+`extract_deals()` below.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +12,9 @@ import json
 import re
 from typing import Any
 
-from anthropic import Anthropic
+import httpx
 
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from config import OPENROUTER_API_BASE, OPENROUTER_API_KEY, OPENROUTER_MODEL
 
 SYSTEM_PROMPT = """You extract structured deal info from messages sent by a VC about companies
 they're considering for investment. A single message may contain multiple deals
@@ -204,40 +209,65 @@ def _repair_truncated_deals_json(text: str) -> str | None:
     return text[: last_complete_end + 1] + "]}"
 
 
+def build_client(timeout: float = 120.0) -> httpx.Client:
+    """Build an httpx client configured for OpenRouter's chat-completions
+    endpoint. Construct once (e.g. in ingest.py's main()) and pass it into
+    extract_deals for each message; falls back to a throwaway client if
+    none is passed in."""
+    return httpx.Client(
+        base_url=OPENROUTER_API_BASE,
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )
+
+
 def extract_deals(
     message_text: str,
-    client: Anthropic | None = None,
+    client: httpx.Client | None = None,
     documents: list[tuple[str, bytes]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Send a Slack message to Claude and return a list of parsed deals.
+    """Send a Slack message to the LLM (via OpenRouter) and return a list
+    of parsed deals.
 
     The list may have 0, 1, or more entries. Each entry has the same keys
     as the previous single-deal extractor returned. Empty list = chatter.
 
     documents: optional list of (mime_type, file_bytes) tuples for any
-    attachments (typically PDF pitchdecks/memos). Each gets passed to
-    Claude as a document content block so it can read layout + images
-    natively — much better than parsing locally and feeding text. The
-    LLM treats the documents as additional context for deal extraction
-    alongside the Slack message text. Only mime types Claude supports
+    attachments (typically PDF pitchdecks/memos). Each gets passed as a
+    `file` content block (base64 data URL) so the model can read layout +
+    images natively — much better than parsing locally and feeding text.
+    The LLM treats the documents as additional context for deal extraction
+    alongside the Slack message text. Only mime types the model supports
     are forwarded; unsupported types are silently skipped.
     """
-    c = client or Anthropic(api_key=ANTHROPIC_API_KEY)
+    c = client or build_client()
     content = _build_user_content(message_text, documents or [])
-    resp = c.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=16384,  # generous — large fund-update lists can hit ~30 deals
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": content}],
+    resp = c.post(
+        "/chat/completions",
+        json={
+            "model": OPENROUTER_MODEL,
+            "max_tokens": 16384,  # generous — large fund-update lists can hit ~30 deals
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+        },
     )
-    # Concatenate all text blocks
-    parts = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-    raw = "".join(parts)
+    resp.raise_for_status()
+    data = resp.json()
+    choice = (data.get("choices") or [{}])[0]
+    raw = choice.get("message", {}).get("content") or ""
+    if isinstance(raw, list):
+        # Some models return content as a list of parts rather than a
+        # plain string — concatenate any text parts.
+        raw = "".join(
+            part.get("text", "") for part in raw if isinstance(part, dict)
+        )
     if not raw.strip():
-        raise ExtractionError("Empty response from Claude")
+        raise ExtractionError("Empty response from LLM")
     try:
         data = _extract_json_object(raw)
     except ExtractionError:
@@ -263,7 +293,7 @@ def extract_deals(
 
 # Back-compat alias — older callers may still use extract_deal.
 def extract_deal(
-    message_text: str, client: Anthropic | None = None
+    message_text: str, client: httpx.Client | None = None
 ) -> dict[str, Any]:
     deals = extract_deals(message_text, client=client)
     if not deals:
@@ -295,21 +325,23 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-# Anthropic claude-opus document support: PDF natively. Other types
-# (PPTX, DOCX, etc.) would need conversion or Files-API upload, which
+# PDF support via OpenRouter's `file` content block works for any model
+# on any plan. Other types (PPTX, DOCX, etc.) would need conversion, which
 # we're not building yet — they're silently skipped with a log line.
 _SUPPORTED_DOC_MIMES = {"application/pdf"}
 
 
-def _build_user_content(text: str, documents: list[tuple[str, bytes]]) -> list[dict]:
-    """Build the user-message `content` array. Documents (if any) go
-    first as document content blocks; the Slack text follows.
+def _build_user_content(
+    text: str, documents: list[tuple[str, bytes]]
+) -> str | list[dict]:
+    """Build the user message `content`. Documents (if any) go first as
+    `file` content blocks; the Slack text follows.
 
-    If no documents are attached, returns a single text block so the
-    request shape stays minimal for the common case.
+    If no documents are attached, returns a plain string so the request
+    shape stays minimal for the common case.
     """
     if not documents:
-        return [{"type": "text", "text": text or ""}]
+        return text or ""
 
     blocks: list[dict] = []
     for mime, data in documents:
@@ -322,17 +354,16 @@ def _build_user_content(text: str, documents: list[tuple[str, bytes]]) -> list[d
         b64 = base64.standard_b64encode(data).decode("ascii")
         blocks.append(
             {
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": mime,
-                    "data": b64,
+                "type": "file",
+                "file": {
+                    "filename": "attachment.pdf",
+                    "file_data": f"data:{mime};base64,{b64}",
                 },
             }
         )
 
     # Always include a text block after documents — when the Slack
-    # message itself has no text, prompt Claude to extract from the
+    # message itself has no text, prompt the model to extract from the
     # attachment alone.
     blocks.append(
         {
