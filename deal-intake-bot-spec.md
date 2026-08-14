@@ -56,7 +56,7 @@ Set under **Settings → Secrets and variables → Actions → New repository se
 | Name | Value |
 |---|---|
 | `SLACK_BOT_TOKEN` | `xoxb-...` |
-| `ANTHROPIC_API_KEY` | `sk-ant-...` |
+| `OPENROUTER_API_KEY` | `sk-or-v1-...` |
 | `ATTIO_API_KEY` | Attio access token |
 
 Non-secret config stays in `config.py` (IDs are fine to commit).
@@ -176,7 +176,7 @@ jobs:
       - run: python scripts/ingest.py
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
 ```
 
@@ -353,7 +353,7 @@ Only the UTC run that maps to 17:00 local does work. The other exits silently.
 | GitHub Actions minutes (private repo) | 2,000/mo free | ~5-min cadence + 1-min runs = ~150/day = ~4,500/mo ⚠️ |
 | Slack Web API rate limit | Tier 2 (~50 req/min) | Fine |
 | Attio API | 100 req/sec | Fine |
-| Anthropic API | Account-dependent | Monitor usage |
+| OpenRouter API | Account-dependent | Monitor usage |
 
 **On the private-repo minute cost:** if you keep the repo private, realistic options are:
 1. Make the repo public (code only, secrets remain hidden) — recommended if nothing sensitive in code
@@ -389,7 +389,7 @@ When ready, paste this in Claude Code:
 2. **Create a GitHub repo** (public recommended for free Actions minutes, or plan for the private-repo cost above).
 3. **Add three secrets** (Settings → Secrets and variables → Actions):
    - `SLACK_BOT_TOKEN`
-   - `ANTHROPIC_API_KEY`
+   - `OPENROUTER_API_KEY`
    - `ATTIO_API_KEY`
 4. **Install Claude Code**: `npm i -g @anthropic-ai/claude-code`
 5. Clone the empty repo locally, drop this spec in it, run `claude` inside, paste the prompt above.

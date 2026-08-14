@@ -9,7 +9,7 @@ import os
 
 # --- Secrets (from env) ---
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 ATTIO_API_KEY = os.environ.get("ATTIO_API_KEY", "")
 
 # --- Slack ---
@@ -165,8 +165,9 @@ PIPELINE_SOURCING_CHANNELS = (
     "Active Sourcing",
 )
 
-# --- LLM ---
-CLAUDE_MODEL = "claude-opus-4-7"
+# --- LLM (via OpenRouter) ---
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "openai/gpt-5-mini"
 
 # --- Ingest ---
 # Lookback window for fetching messages from Slack on each cron fire.
