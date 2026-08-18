@@ -202,11 +202,6 @@ def _apply_deck_reply(
     uploaded = _upload_attachments_to_company(attio, company_id, attachments)
 
     link = _deck_link_in(reply.get("text") or "")
-    if not link and attachments:
-        # No link given, but the file is now on the record — the reply
-        # permalink is at least a working route back to the original.
-        link = slack.permalink(reply["ts"])
-
     updated = _record_deck_link(attio, company_id, link) if link else 0
 
     if not uploaded and not updated:
@@ -257,15 +252,10 @@ def _record_deck_link(attio: AttioClient, company_id: str, link: str) -> int:
 
 
 def _should_overwrite(current: str | None, new: str) -> bool:
-    """Only fill a blank field, or replace a Slack permalink with a real
-    deck link. Never clobber a link someone entered by hand."""
-    if not current:
-        return True
-    if current.strip() == new.strip():
-        return False
-    if "slack.com" in current.lower() and "slack.com" not in new.lower():
-        return True
-    return False
+    """Fill a blank field only. An existing value was either entered by hand
+    or captured from an earlier message, and a late reply is no reason to
+    overwrite it."""
+    return not current
 
 
 def _newest_entry_for_company(

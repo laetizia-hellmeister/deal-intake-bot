@@ -316,10 +316,10 @@ def _process_one_deal(
             lead_members.append(m)
 
     attachments = attachments or []
-    # The Pitchdeck field holds a link. A deck link in the message is the
-    # best value; failing that, if we filed a deck on the record, the Slack
-    # permalink at least gets you to the original file in one click.
-    pitchdeck = deal.get("pitchdeck_url") or (permalink if attachments else None)
+    # Pitchdeck holds a deck link and nothing else. A deck that arrived as a
+    # file needs no value here — it's on the company's Files tab, and the
+    # description already carries the Slack permalink.
+    pitchdeck = deal.get("pitchdeck_url")
 
     company_name = deal.get("company_name") or "unknown company"
     stage = deal.get("stage")
