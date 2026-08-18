@@ -188,6 +188,21 @@ INGEST_MESSAGE_LIMIT = 50
 # recent reply is inside INGEST_LOOKBACK_SECONDS actually get fetched (see
 # deck_replies.py). So the window sets how *old* a thread can be and still
 # accept a late deck, not how much work each run does.
+# Reactions marking a thread reply as handled by the deck pass. Deliberately
+# its own set rather than shared with any other reply handler, so the deck
+# feature doesn't depend on another feature's constants.
+REACTION_DECK_FILED = "white_check_mark"     # ✅ deck filed on the company
+REACTION_DECK_NOTHING_NEW = "fast_forward"   # ⏭️ already filed, nothing to do
+REACTION_DECK_CLARIFY = "grey_question"      # ❓ can't tell which company
+REACTION_DECK_ERROR = REACTION_ERROR         # ⚠️ upload / write failed
+
+DECK_REPLY_PROCESSED_REACTIONS = {
+    REACTION_DECK_FILED,
+    REACTION_DECK_NOTHING_NEW,
+    REACTION_DECK_CLARIFY,
+    REACTION_DECK_ERROR,
+}
+
 DECK_REPLY_THREAD_LOOKBACK_DAYS = 30
 DECK_REPLY_MAX_HISTORY = 1000
 

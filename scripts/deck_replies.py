@@ -30,18 +30,17 @@ from datetime import datetime, timezone
 from attio_client import AttioClient
 from config import (
     DEAL_PIPELINE_LIST_ID,
-    NAME_FUZZY_THRESHOLD,
     DECK_LINK_HOSTS,
     DECK_REPLY_MAX_HISTORY,
+    DECK_REPLY_PROCESSED_REACTIONS,
     DECK_REPLY_THREAD_LOOKBACK_DAYS,
-    DIGEST_MARKER,
     INBOUND_DEALS_LIST_ID,
     INGEST_LOOKBACK_SECONDS,
-    REACTION_REPLY_APPLIED,
-    REACTION_REPLY_CLARIFY,
-    REACTION_REPLY_ERROR,
-    REACTION_REPLY_SKIPPED,
-    REPLY_PROCESSED_REACTIONS,
+    NAME_FUZZY_THRESHOLD,
+    REACTION_DECK_CLARIFY,
+    REACTION_DECK_ERROR,
+    REACTION_DECK_FILED,
+    REACTION_DECK_NOTHING_NEW,
 )
 from ingest import _collect_message_files, _upload_attachments_to_company
 from rapidfuzz import fuzz
@@ -107,8 +106,10 @@ def _threads_with_recent_replies(history: list[dict]) -> list[dict]:
             continue
         if not msg.get("reply_count"):
             continue
-        # The outreach-chase digest has its own reply handler.
-        if DIGEST_MARKER in (msg.get("text") or ""):
+        # Only threads rooted in a human deal message. The bot's own posts
+        # (the outreach digest, the promotion summary) carry no deal for a
+        # deck to attach to, and their replies belong to other handlers.
+        if SlackClient.is_from_bot(msg):
             continue
         latest = msg.get("latest_reply")
         if not latest:
@@ -142,7 +143,7 @@ def _process_thread(
         for m in messages
         if m.get("ts") != thread_ts
         and not SlackClient.is_from_bot(m)
-        and not SlackClient.has_processed_reaction(m, REPLY_PROCESSED_REACTIONS)
+        and not SlackClient.has_processed_reaction(m, DECK_REPLY_PROCESSED_REACTIONS)
         and (m.get("files") or _deck_link_in(m.get("text") or ""))
     ]
     if not candidates:
@@ -163,7 +164,7 @@ def _process_thread(
                     "📎 Got a deck here, but I can't tell which Attio "
                     "company it belongs to — this thread has no staged deal.",
                 )
-                slack.add_reaction(ts, REACTION_REPLY_CLARIFY)
+                slack.add_reaction(ts, REACTION_DECK_CLARIFY)
                 continue
             if len(company_ids) == 1:
                 company_id = next(iter(company_ids))
@@ -188,18 +189,18 @@ def _process_thread(
                     "I can't tell which one it belongs to. Name the company "
                     "in the reply (or in the filename) and I'll file it.",
                 )
-                slack.add_reaction(ts, REACTION_REPLY_CLARIFY)
+                slack.add_reaction(ts, REACTION_DECK_CLARIFY)
                 continue
             if _apply_deck_reply(slack, attio, reply, company_id):
-                slack.add_reaction(ts, REACTION_REPLY_APPLIED)
+                slack.add_reaction(ts, REACTION_DECK_FILED)
                 applied += 1
             else:
-                slack.add_reaction(ts, REACTION_REPLY_SKIPPED)
+                slack.add_reaction(ts, REACTION_DECK_NOTHING_NEW)
         except Exception as e:
             print(f"[decks] reply {ts} failed: {e}")
             traceback.print_exc()
             try:
-                slack.add_reaction(ts, REACTION_REPLY_ERROR)
+                slack.add_reaction(ts, REACTION_DECK_ERROR)
             except Exception:
                 pass
     return applied
