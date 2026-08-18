@@ -34,6 +34,7 @@ Schema:
       "round_size_eur_m": number | null,
       "sector": string | null,
       "description": string | null,
+      "pitchdeck_url": string | null,
       "source": string | null,
       "sourcing_channel": string | null,
       "geo_skip": boolean,
@@ -67,6 +68,14 @@ Rules:
   a personal LinkedIn profile (linkedin.com/in/...) here — personal
   profiles belong in founders[].linkedin. Set to null if no company
   LinkedIn page is mentioned.
+- pitchdeck_url = a link to this company's pitch deck, data room, or
+  deck-sharing page, if the message contains one. Typical hosts are
+  DocSend, Google Drive/Docs/Slides, Dropbox, Notion, Pitch, Papermark,
+  BriefLink, and similar. Use the full URL exactly as written. This is
+  NOT the company website and NOT a LinkedIn page — set null if the only
+  links are the company site, a LinkedIn profile, or an unrelated article
+  (e.g. a news piece or a YouTube video). In a multi-deal message, attach
+  each link to the deal it belongs to; null for the others.
 - source = who shared this deal, e.g. "Hillary from TestCo VC", "shared by
   Tom Smith". If the source is stated once at the top of a multi-deal
   message, copy it onto each deal. If the deal was surfaced through a
@@ -314,6 +323,7 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
         "round_size_eur_m": _coerce_number(data.get("round_size_eur_m")),
         "sector": _clean_str(data.get("sector")),
         "description": _clean_str(data.get("description")),
+        "pitchdeck_url": _normalize_deck_url(data.get("pitchdeck_url")),
         "source": _clean_str(data.get("source")),
         "sourcing_channel": _normalize_sourcing_channel(
             data.get("sourcing_channel")
@@ -377,6 +387,21 @@ def _build_user_content(
         }
     )
     return blocks
+
+
+def _normalize_deck_url(v: Any) -> str | None:
+    """Keep a deck link only if it's a plausible http(s) URL that isn't a
+    LinkedIn page. The model is told not to return the company site or a
+    LinkedIn profile here, but it occasionally does anyway."""
+    s = _clean_str(v)
+    if not s:
+        return None
+    s = s.strip().rstrip(").,;")
+    if not re.match(r"^https?://", s, re.IGNORECASE):
+        return None
+    if "linkedin.com" in s.lower():
+        return None
+    return s
 
 
 def _normalize_user_ids(v: Any) -> list[str]:

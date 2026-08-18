@@ -5,6 +5,7 @@ A Slack bot that processes deal messages from `#deal-intake` and stages them in 
 ## What it does
 
 - **Ingest (every 5 min):** polls the Slack channel, parses new deal messages with an LLM (via OpenRouter), checks scope (Angel/Pre-seed/Seed only), fuzzy-matches against existing Attio companies, and either skips, flags as duplicate, or stages in the **Inbound Deals** list. Uses Slack reactions (✅ ⏭️ 🔁 🤷 ⚠️) to track processed state — no database needed.
+- **Pitchdecks:** any file attached to a deal message is uploaded to the company record's **Files** tab in Attio (via `POST /v2/files/upload`, multipart — undocumented but it's what the UI's drag-and-drop uses). PDFs are additionally passed to the LLM so the deck's contents inform extraction. A deck *link* in the message (DocSend, Drive, Notion, ...) goes into the Inbound Deals **Pitchdeck** field; when a file was filed but no link was given, the Slack permalink goes there instead. Files are only filed when the message contains exactly one deal — on a multi-deal list there's no way to tell which company a file belongs to.
 - **Promote (daily 17:00 Europe/Copenhagen):** moves any Inbound Deals entries marked `Add to pipeline` into the main **Deal Pipeline** list and flips their step to `Added`.
 
 ## Setup
@@ -62,6 +63,13 @@ requirements.txt
 | ⏭️ `fast_forward` | Out of scope (stage) |
 | 🤷 `shrug` | Not a deal |
 | ⚠️ `warning` | Error during processing — remove reaction to retry |
+
+## Reply-line markers
+
+| Marker | Meaning |
+|---|---|
+| 📎 | File(s) filed on the company record's Files tab in Attio |
+| 🔗 | A deck link was captured into the Pitchdeck field |
 
 ## Notes
 

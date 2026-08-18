@@ -145,7 +145,8 @@ def _process_message(
         # Pitchdecks / memos attached to the message get pulled in too.
         # Currently PDF is the only natively-supported document type;
         # other mimes are silently skipped by the extractor.
-        documents = _download_message_documents(slack, msg)
+        attachments = _collect_message_files(slack, msg)
+        documents = _llm_documents(attachments)
         had_attachment = bool(documents)
 
         try:
@@ -190,6 +191,20 @@ def _process_message(
             if uid in SLACK_USER_TO_ATTIO_MEMBER
         ]
 
+        # Attachments are only filed against the company when the message
+        # yields exactly one deal. On a multi-deal message (a fund update,
+        # a list of five companies) there's no reliable way to tell which
+        # company a given file belongs to, and filing a deck on the wrong
+        # record is worse than not filing it.
+        if attachments and len(deals) > 1:
+            print(
+                f"[ingest] {len(attachments)} attachment(s) on a "
+                f"{len(deals)}-deal message — not filing to any company"
+            )
+            deal_attachments: list[dict] = []
+        else:
+            deal_attachments = attachments
+
         # Process each deal independently; collect a per-deal outcome line.
         outcomes: list[dict[str, Any]] = []
         for deal in deals:
@@ -198,6 +213,7 @@ def _process_message(
                     attio=attio,
                     deal=deal,
                     permalink=permalink,
+                    attachments=deal_attachments,
                     sourcer_member=sourcer_member,
                     poster_member=poster_member,
                     message_mention_members=message_mention_members,
@@ -266,6 +282,7 @@ def _process_one_deal(
     inbound_index: dict[str, list[dict]] | None = None,
     pipeline_index: dict[str, list[dict]] | None = None,
     had_attachment: bool = False,
+    attachments: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Process a single deal extracted from a Slack message.
 
@@ -297,6 +314,12 @@ def _process_one_deal(
     for m in deal_mention_members + ([poster_member] if poster_member else []):
         if m and m not in lead_members:
             lead_members.append(m)
+
+    attachments = attachments or []
+    # The Pitchdeck field holds a link. A deck link in the message is the
+    # best value; failing that, if we filed a deck on the record, the Slack
+    # permalink at least gets you to the original file in one click.
+    pitchdeck = deal.get("pitchdeck_url") or (permalink if attachments else None)
 
     company_name = deal.get("company_name") or "unknown company"
     stage = deal.get("stage")
@@ -381,6 +404,12 @@ def _process_one_deal(
                 lead_members=lead_members,
                 founder_linkedins=founder_linkedins,
                 days_since_first_seen=days_since_first_seen,
+                pitchdeck=pitchdeck,
+            )
+            # File the deck even on a duplicate — a second sighting often
+            # arrives with material we didn't have the first time.
+            _upload_attachments_to_company(
+                attio, match.company_id or "", attachments
             )
             attio.add_record_to_list(
                 list_id=INBOUND_DEALS_LIST_ID,
@@ -434,7 +463,10 @@ def _process_one_deal(
             lead_members=lead_members,
             founder_linkedins=founder_linkedins,
             days_since_first_seen=days_since_first_seen,
+            pitchdeck=pitchdeck,
         )
+
+        _upload_attachments_to_company(attio, company_id, attachments)
 
         attio.add_record_to_list(
             list_id=INBOUND_DEALS_LIST_ID,
@@ -449,7 +481,13 @@ def _process_one_deal(
         sector = deal.get("sector") or "?"
         stage_label = stage_for_scope or "stage ?"
         attio_url = AttioClient.company_web_url(company_id)
-        deck_suffix = " 📎" if had_attachment else ""
+        # 📎 = file filed on the record, 🔗 = deck link captured. Either
+        # means the deck is reachable from Attio; both can apply.
+        deck_suffix = ""
+        if attachments:
+            deck_suffix += " 📎"
+        if deal.get("pitchdeck_url"):
+            deck_suffix += " 🔗"
         if direct:
             tag = "(resurfacing, direct)" if is_resurface else "(direct)"
             line = (
@@ -702,6 +740,7 @@ def _build_inbound_entry_values(
     lead_members: list[str],
     founder_linkedins: list[str] | None = None,
     days_since_first_seen: int = 0,
+    pitchdeck: str | None = None,
 ) -> dict[str, Any]:
     """Build the entry_values payload for an Inbound Deals entry, dropping
     any keys whose value is None/empty. Attio rejects explicit nulls on
@@ -718,6 +757,8 @@ def _build_inbound_entry_values(
                     triage. Skipped if empty.
     """
     values: dict[str, Any] = {"step": step}
+    if pitchdeck:
+        values["pitchdeck"] = pitchdeck
     if source:
         values["source"] = source
     if description:
@@ -818,33 +859,25 @@ def _build_inbound_description(
     return base
 
 
-def _download_message_documents(
-    slack: SlackClient, msg: dict
-) -> list[tuple[str, bytes]]:
-    """Fetch any file attachments on the Slack message that we can pass
-    to Claude as document blocks. Returns a list of (mime, bytes) tuples.
+def _collect_message_files(slack: SlackClient, msg: dict) -> list[dict]:
+    """Download every file attached to the Slack message. Returns a list of
+    {"name", "mime", "data"} dicts.
 
-    Currently filters to PDF only — Claude handles those natively. Other
-    types (PPTX, DOCX, images) are skipped with a log line; we can add
-    handling later if needed. Requires the bot to have the `files:read`
-    OAuth scope.
+    Everything downloadable is kept, whatever the type — all of it gets
+    uploaded to the company's Files tab in Attio. Only PDFs are additionally
+    fed to the model (see _llm_documents). Requires the `files:read` OAuth
+    scope on the bot token.
     """
     files = msg.get("files") or []
     if not files:
         return []
-    out: list[tuple[str, bytes]] = []
+    out: list[dict] = []
     for f in files:
         if not isinstance(f, dict):
             continue
-        mime = (f.get("mimetype") or "").lower()
+        mime = (f.get("mimetype") or "").lower() or "application/octet-stream"
         url = f.get("url_private_download") or f.get("url_private")
-        name = f.get("name", "?")
-        if mime != "application/pdf":
-            print(
-                f"[ingest] skipping attachment {name!r} — mime={mime!r} "
-                "not supported (only PDF for now)"
-            )
-            continue
+        name = f.get("name") or "attachment"
         if not url:
             continue
         data = slack.download_file(url)
@@ -856,17 +889,116 @@ def _download_message_documents(
         # the common case by content type, but check the PDF magic number
         # too — base64-ing HTML into a `file` block makes the LLM call fail
         # with a confusing "The PDF specified was not valid".
-        if not data.startswith(b"%PDF"):
+        if mime == "application/pdf" and not data.startswith(b"%PDF"):
             print(
                 f"[ingest] attachment {name!r} downloaded but is not a PDF "
                 f"(first bytes: {data[:16]!r}, {len(data)} bytes) — skipping"
             )
             continue
-        # OpenRouter's per-request body size cap is generous; we'll let
-        # the API reject anything too big rather than guess thresholds.
-        print(f"[ingest] attached PDF {name!r} ({len(data)} bytes)")
-        out.append((mime, data))
+        print(f"[ingest] attachment {name!r} ({mime}, {len(data)} bytes)")
+        out.append({"name": name, "mime": mime, "data": data})
     return out
+
+
+def _llm_documents(files: list[dict]) -> list[tuple[str, bytes]]:
+    """The subset of downloaded files we can hand to the model. PDF only —
+    other formats would need converting first."""
+    # OpenRouter's per-request body size cap is generous; we'll let the API
+    # reject anything too big rather than guess thresholds.
+    return [
+        (f["mime"], f["data"])
+        for f in files
+        if f["mime"] == "application/pdf"
+    ]
+
+
+def _split_versioned_name(name: str) -> tuple[str, str]:
+    """Split a filename into (base, extension-with-dot). "Deck.pdf" ->
+    ("Deck", ".pdf"); "Deck" -> ("Deck", "")."""
+    stem, dot, ext = name.rpartition(".")
+    return (stem, f".{ext}") if dot else (name, "")
+
+
+_VERSION_SUFFIX_RE = re.compile(r"^(?P<base>.*) \((?P<n>\d+)\)$")
+
+
+def _family_sizes(
+    sizes_by_name: dict[str, set[int]], name: str
+) -> set[int]:
+    """Sizes of every stored file belonging to `name`'s version family —
+    the name itself plus any "name (2)", "name (3)" copies."""
+    base, ext = _split_versioned_name(name)
+    out: set[int] = set()
+    for stored, sizes in sizes_by_name.items():
+        stored_base, stored_ext = _split_versioned_name(stored)
+        if stored_ext != ext:
+            continue
+        m = _VERSION_SUFFIX_RE.match(stored_base)
+        if (m.group("base") if m else stored_base) == base:
+            out |= sizes
+    return out
+
+
+def _upload_attachments_to_company(
+    attio: AttioClient, company_id: str, attachments: list[dict]
+) -> int:
+    """Upload each attachment to the company's Files tab, skipping any that
+    are already there. Returns how many were newly uploaded.
+
+    Slack messages get reprocessed (someone clears the ⚠️ to retry), so
+    match on name + byte size to avoid stacking duplicate copies of the
+    same deck on the record.
+    """
+    if not company_id or not attachments:
+        return 0
+    # Attio enforces unique filenames per record — a same-name upload is
+    # rejected with 409 uniqueness_conflict whatever the bytes are. So the
+    # existing set is keyed by name, with the size kept alongside to tell
+    # "already have this exact file" from "new version of the same name".
+    sizes_by_name: dict[str, set[int]] = {}
+    for f in attio.list_record_files(company_id):
+        name = f.get("name")
+        if name:
+            sizes_by_name.setdefault(name, set()).add(f.get("content_size"))
+
+    uploaded = 0
+    for a in attachments:
+        name, size = a["name"], len(a["data"])
+        # Compare against every stored version of this name, "Deck.pdf" and
+        # "Deck (2).pdf" alike. Checking only the bare name would re-upload
+        # an already-stored update as (3), (4), ... on every rerun.
+        if size in _family_sizes(sizes_by_name, name):
+            print(
+                f"[ingest] {name!r} already on company {company_id}, "
+                "not re-uploading"
+            )
+            continue
+        # Same name, different bytes — an updated deck. Keep both rather
+        # than lose either, under an OS-style "(2)" suffix.
+        upload_name = name
+        if name in sizes_by_name:
+            stem, dot, ext = name.rpartition(".")
+            base = stem if dot else name
+            suffix = f".{ext}" if dot else ""
+            n = 2
+            while upload_name in sizes_by_name:
+                upload_name = f"{base} ({n}){suffix}"
+                n += 1
+            print(
+                f"[ingest] {name!r} exists with different content — "
+                f"uploading as {upload_name!r}"
+            )
+        result = attio.upload_record_file(
+            record_id=company_id,
+            filename=upload_name,
+            content=a["data"],
+            content_type=a["mime"],
+        )
+        if result:
+            uploaded += 1
+            sizes_by_name.setdefault(upload_name, set()).add(size)
+            print(f"[ingest] uploaded {upload_name!r} to company {company_id}")
+    return uploaded
 
 
 def _fallback_source(slack: SlackClient, msg: dict) -> str | None:

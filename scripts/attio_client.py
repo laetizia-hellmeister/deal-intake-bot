@@ -33,10 +33,12 @@ class AttioError(Exception):
 
 class AttioClient:
     def __init__(self, api_key: str | None = None, timeout: float = 30.0):
+        self._api_key = api_key or ATTIO_API_KEY
+        self._timeout = timeout
         self._client = httpx.Client(
             base_url=ATTIO_API_BASE,
             headers={
-                "Authorization": f"Bearer {api_key or ATTIO_API_KEY}",
+                "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
             timeout=timeout,
@@ -329,6 +331,80 @@ class AttioClient:
             list_id, filter_={"entry_id": entry_id}, limit=1
         )
         return matches[0] if matches else None
+
+    # -- files -------------------------------------------------------------
+    # Attio's documented Files API is read-only plus "connect a file that
+    # already lives in Drive/Dropbox/Box/OneDrive". Raw uploads go through
+    # the undocumented POST /v2/files/upload, which takes multipart/form-data
+    # and stores the bytes natively (storage_provider "attio"), exactly as a
+    # drag-and-drop into the record's Files tab does.
+
+    def list_record_files(
+        self, record_id: str, object_slug: str = PARENT_OBJECT
+    ) -> list[dict]:
+        """Files already attached to a record. Used to avoid re-uploading
+        the same deck when a Slack message gets reprocessed."""
+        if not record_id:
+            return []
+        try:
+            data = self._request(
+                "GET",
+                "/files",
+                params={"object": object_slug, "record_id": record_id},
+            )
+        except AttioError as e:
+            print(f"[attio] list_record_files({record_id}) failed: {e}")
+            return []
+        return data.get("data", []) or []
+
+    def upload_record_file(
+        self,
+        record_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+        object_slug: str = PARENT_OBJECT,
+    ) -> dict | None:
+        """Upload bytes into a record's Files tab. Returns the created file
+        object, or None on failure.
+
+        Needs its own httpx call rather than `_request`: the shared client
+        pins `Content-Type: application/json`, and httpx has to set the
+        multipart content type itself so it can include the boundary.
+        """
+        if not record_id or not content:
+            return None
+        url = f"{ATTIO_API_BASE}/files/upload"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        files = {"file": (filename, content, content_type)}
+        data = {"object": object_slug, "record_id": record_id}
+        for attempt in (1, 2):
+            try:
+                r = httpx.post(
+                    url,
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=max(self._timeout, 120.0),
+                )
+            except Exception as e:
+                print(f"[attio] file upload {filename!r} error: {e}")
+                return None
+            if r.status_code in _RETRYABLE_STATUSES and attempt == 1:
+                print(
+                    f"[attio] file upload {filename!r} -> {r.status_code}, "
+                    "retrying in 2s"
+                )
+                time.sleep(2.0)
+                continue
+            if r.status_code >= 400:
+                print(
+                    f"[attio] file upload {filename!r} -> {r.status_code}: "
+                    f"{r.text[:300]}"
+                )
+                return None
+            return (r.json() or {}).get("data")
+        return None
 
     # -- convenience -------------------------------------------------------
 
