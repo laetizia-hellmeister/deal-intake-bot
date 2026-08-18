@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from attio_client import AttioClient
 from config import (
     DEAL_PIPELINE_LIST_ID,
+    NAME_FUZZY_THRESHOLD,
     DECK_LINK_HOSTS,
     DECK_REPLY_MAX_HISTORY,
     DECK_REPLY_THREAD_LOOKBACK_DAYS,
@@ -43,6 +44,7 @@ from config import (
     REPLY_PROCESSED_REACTIONS,
 )
 from ingest import _collect_message_files, _upload_attachments_to_company
+from rapidfuzz import fuzz
 from slack_client import SlackClient
 
 # The company record id out of an Attio URL the bot posted.
@@ -163,21 +165,31 @@ def _process_thread(
                 )
                 slack.add_reaction(ts, REACTION_REPLY_CLARIFY)
                 continue
-            if len(company_ids) > 1:
+            if len(company_ids) == 1:
+                company_id = next(iter(company_ids))
+            else:
+                # Several deals in one thread. The filenames and the reply
+                # text usually say which one ("AeroSilicon_Pitch.pdf"), so
+                # try to name it before giving up.
+                company_id = _disambiguate_company(
+                    attio, company_ids, reply
+                )
+            if not company_id:
                 print(
                     f"[decks] reply {ts}: thread names "
-                    f"{len(company_ids)} companies — ambiguous, skipping"
+                    f"{len(company_ids)} companies and nothing in the reply "
+                    "picks one — skipping"
                 )
+                names = _company_names(attio, company_ids)
+                listed = ", ".join(sorted(names.values())) or "several deals"
                 slack.post_thread_reply(
                     thread_ts,
-                    f"📎 Got a deck here, but this thread covers "
-                    f"{len(company_ids)} companies so I can't tell which one "
-                    "it belongs to. Add it on the company in Attio directly.",
+                    f"📎 Got a deck here, but this thread covers {listed} and "
+                    "I can't tell which one it belongs to. Name the company "
+                    "in the reply (or in the filename) and I'll file it.",
                 )
                 slack.add_reaction(ts, REACTION_REPLY_CLARIFY)
                 continue
-
-            company_id = next(iter(company_ids))
             if _apply_deck_reply(slack, attio, reply, company_id):
                 slack.add_reaction(ts, REACTION_REPLY_APPLIED)
                 applied += 1
@@ -191,6 +203,78 @@ def _process_thread(
             except Exception:
                 pass
     return applied
+
+
+def _company_names(
+    attio: AttioClient, company_ids: set[str]
+) -> dict[str, str]:
+    """{record_id: company name} for the companies a thread mentions."""
+    out: dict[str, str] = {}
+    for cid in company_ids:
+        record = attio.get_record("companies", cid)
+        name = AttioClient.company_name(record or {})
+        if name:
+            out[cid] = name
+    return out
+
+
+def _norm_for_match(s: str) -> str:
+    """Lowercase alphanumerics only, so "AeroSilicon_Pitch.pdf" and
+    "Aerosilicon" line up."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _match_needles(name: str) -> list[str]:
+    """The strings worth matching a company name by. Stealth deals are named
+    "Stealth (Max Grollmann)" by ingest's naming heuristic, so the founder
+    inside the parens is its own candidate — otherwise the literal "Stealth"
+    prefix drags the score below threshold when someone names the founder.
+    """
+    out = [name]
+    inner = re.findall(r"\(([^)]+)\)", name)
+    out.extend(inner)
+    return out
+
+
+def _name_matches(name: str, haystack: str) -> bool:
+    for candidate in _match_needles(name):
+        needle = _norm_for_match(candidate)
+        # Short names ("Ai", "Xo") match almost anything under partial_ratio.
+        if len(needle) < 5:
+            continue
+        if fuzz.partial_ratio(needle, haystack) >= NAME_FUZZY_THRESHOLD:
+            return True
+    return False
+
+
+def _disambiguate_company(
+    attio: AttioClient, company_ids: set[str], reply: dict
+) -> str | None:
+    """Pick which of a thread's companies a reply's deck belongs to, using
+    the filenames and the reply text. Returns None unless exactly one
+    company matches — a wrong guess files a deck on the wrong record.
+    """
+    names = _company_names(attio, company_ids)
+    if not names:
+        return None
+    haystack = _norm_for_match(
+        (reply.get("text") or "")
+        + " "
+        + " ".join(f.get("name") or "" for f in (reply.get("files") or []))
+    )
+    if not haystack:
+        return None
+
+    matches = []
+    for cid, name in names.items():
+        if _name_matches(name, haystack):
+            matches.append((cid, name))
+
+    if len(matches) == 1:
+        cid, name = matches[0]
+        print(f"[decks] resolved deck to {name!r} ({cid}) from the filenames")
+        return cid
+    return None
 
 
 def _apply_deck_reply(
