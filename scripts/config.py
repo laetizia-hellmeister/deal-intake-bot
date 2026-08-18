@@ -178,6 +178,40 @@ OPENROUTER_MODEL = "openai/gpt-5-mini"
 INGEST_LOOKBACK_SECONDS = 14400      # 4 hours
 INGEST_MESSAGE_LIMIT = 50
 
+# --- Deck replies (pitchdecks posted as a thread reply) ---
+# A deck often arrives after the deal was already staged — Laetizia replies
+# in the bot's thread with the PDF, or the founder sends it on later. The
+# deck-reply pass scans thread replies and files them against the company
+# the thread's root message resolved to.
+#
+# Threads are looked for across this window, but only threads whose most
+# recent reply is inside INGEST_LOOKBACK_SECONDS actually get fetched (see
+# deck_replies.py). So the window sets how *old* a thread can be and still
+# accept a late deck, not how much work each run does.
+DECK_REPLY_THREAD_LOOKBACK_DAYS = 30
+DECK_REPLY_MAX_HISTORY = 1000
+
+# Hosts whose links count as a pitch deck / data room when they show up in a
+# thread reply. Matched as a domain suffix, case-insensitively. Deliberately
+# an allowlist rather than an LLM call: it's one regex on a short reply, and
+# a wrong guess would overwrite a good Pitchdeck value.
+DECK_LINK_HOSTS = (
+    "docsend.com",
+    "drive.google.com",
+    "docs.google.com",
+    "dropbox.com",
+    "box.com",
+    "onedrive.live.com",
+    "1drv.ms",
+    "notion.so",
+    "notion.site",
+    "pitch.com",
+    "papermark.io",
+    "papermark.com",
+    "brieflink.com",
+    "figma.com",
+)
+
 # --- Dedupe ---
 NAME_FUZZY_THRESHOLD = 85
 NAME_STOP_WORDS = {"the", "inc", "ltd", "gmbh", "ag", "sa", "llc", "co"}

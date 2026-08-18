@@ -55,6 +55,34 @@ class SlackClient:
         )
         return resp.get("messages", []) or []
 
+    def fetch_messages_since(
+        self, oldest_ts: int, max_messages: int
+    ) -> list[dict]:
+        """Return up to `max_messages` channel messages newer than
+        `oldest_ts` (a Unix second), following cursors across pages.
+
+        Separate from fetch_recent_messages because that one is a single
+        capped page — fine for ingest's 4-hour window, not for the
+        multi-week sweep the deck-reply pass needs.
+        """
+        out: list[dict] = []
+        cursor: str | None = None
+        while len(out) < max_messages:
+            kwargs: dict[str, Any] = {
+                "channel": self.channel_id,
+                "oldest": str(int(oldest_ts)),
+                "limit": min(200, max_messages - len(out)),
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.conversations_history(**kwargs)
+            page = resp.get("messages", []) or []
+            out.extend(page)
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+            if not cursor or not page:
+                break
+        return out
+
     # -- filtering ---------------------------------------------------------
 
     @staticmethod

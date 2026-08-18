@@ -1,0 +1,307 @@
+"""Files pitchdecks that arrive as a thread reply rather than on the
+original deal message.
+
+A deck often shows up after the deal was already staged: Laetizia replies
+in the bot's thread with the PDF, or the founder sends it on a few days
+later. Ingest itself only looks at top-level messages, so those replies
+were previously invisible.
+
+Which company a reply belongs to is recovered from the bot's own threaded
+reply, which ends every deal line with the Attio company URL:
+
+    ✅ Acme · Pre-seed · €2M · healthtech (https://app.attio.com/.../record/<id>)
+
+That keeps this pass stateless, the same trick outreach_replies.py uses to
+map digest rows back to entry_ids. If the bot's reply names more than one
+company, the deck is left alone — filing it against the wrong record is
+worse than not filing it.
+
+Runs right after ingest on the same schedule.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+import time
+import traceback
+from datetime import datetime, timezone
+
+from attio_client import AttioClient
+from config import (
+    DEAL_PIPELINE_LIST_ID,
+    DECK_LINK_HOSTS,
+    DECK_REPLY_MAX_HISTORY,
+    DECK_REPLY_THREAD_LOOKBACK_DAYS,
+    DIGEST_MARKER,
+    INBOUND_DEALS_LIST_ID,
+    INGEST_LOOKBACK_SECONDS,
+    REACTION_REPLY_APPLIED,
+    REACTION_REPLY_CLARIFY,
+    REACTION_REPLY_ERROR,
+    REACTION_REPLY_SKIPPED,
+    REPLY_PROCESSED_REACTIONS,
+)
+from ingest import _collect_message_files, _upload_attachments_to_company
+from slack_client import SlackClient
+
+# The company record id out of an Attio URL the bot posted.
+_RECORD_URL_RE = re.compile(
+    r"/objects/companies/record/([0-9a-fA-F-]{36})"
+)
+
+# Slack renders links as <url> or <url|label>; grab the url part.
+_SLACK_LINK_RE = re.compile(r"<(https?://[^|>\s]+)(?:\|[^>]*)?>")
+_BARE_URL_RE = re.compile(r"https?://[^\s<>|]+")
+
+# Sort key fallback for entries Attio returned without a created_at.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def main() -> int:
+    slack = SlackClient()
+    attio = AttioClient()
+
+    oldest = int(time.time() - DECK_REPLY_THREAD_LOOKBACK_DAYS * 86400)
+    try:
+        history = slack.fetch_messages_since(oldest, DECK_REPLY_MAX_HISTORY)
+    except Exception as e:
+        print(f"[decks] failed to fetch Slack history: {e}")
+        attio.close()
+        return 1
+
+    threads = _threads_with_recent_replies(history)
+    print(
+        f"[decks] {len(history)} message(s) in the last "
+        f"{DECK_REPLY_THREAD_LOOKBACK_DAYS}d, {len(threads)} thread(s) with "
+        "recent replies"
+    )
+
+    applied = 0
+    for parent in threads:
+        try:
+            applied += _process_thread(slack, attio, parent)
+        except Exception as e:
+            print(f"[decks] thread {parent.get('ts')} failed: {e}")
+            traceback.print_exc()
+
+    print(f"[decks] done. Filed decks from {applied} reply/replies.")
+    attio.close()
+    return 0
+
+
+def _threads_with_recent_replies(history: list[dict]) -> list[dict]:
+    """Thread parents worth opening: they have replies, and the newest reply
+    landed inside the ingest lookback window.
+
+    `latest_reply` comes back on threaded parents in conversations.history,
+    so this filter costs nothing and keeps the run from re-fetching every
+    thread of the last 30 days on every 5-minute tick.
+    """
+    cutoff = time.time() - INGEST_LOOKBACK_SECONDS
+    out: list[dict] = []
+    for msg in history:
+        if SlackClient.is_thread_reply(msg):
+            continue
+        if not msg.get("reply_count"):
+            continue
+        # The outreach-chase digest has its own reply handler.
+        if DIGEST_MARKER in (msg.get("text") or ""):
+            continue
+        latest = msg.get("latest_reply")
+        if not latest:
+            continue
+        try:
+            if float(latest) < cutoff:
+                continue
+        except (TypeError, ValueError):
+            continue
+        out.append(msg)
+    out.sort(key=lambda m: float(m.get("ts", "0")))
+    return out
+
+
+def _process_thread(
+    slack: SlackClient, attio: AttioClient, parent: dict
+) -> int:
+    """Handle every unprocessed deck-bearing reply in one thread. Returns
+    how many replies were applied."""
+    thread_ts = parent.get("ts")
+    if not thread_ts:
+        return 0
+    try:
+        messages = slack.fetch_thread_replies(thread_ts)
+    except Exception as e:
+        print(f"[decks] couldn't fetch thread {thread_ts}: {e}")
+        return 0
+
+    candidates = [
+        m
+        for m in messages
+        if m.get("ts") != thread_ts
+        and not SlackClient.is_from_bot(m)
+        and not SlackClient.has_processed_reaction(m, REPLY_PROCESSED_REACTIONS)
+        and (m.get("files") or _deck_link_in(m.get("text") or ""))
+    ]
+    if not candidates:
+        return 0
+
+    company_ids = _company_ids_from_bot_replies(messages)
+    applied = 0
+    for reply in candidates:
+        ts = reply["ts"]
+        try:
+            if not company_ids:
+                print(
+                    f"[decks] reply {ts}: no Attio company in the thread's "
+                    "bot reply — nothing to file against"
+                )
+                slack.post_thread_reply(
+                    thread_ts,
+                    "📎 Got a deck here, but I can't tell which Attio "
+                    "company it belongs to — this thread has no staged deal.",
+                )
+                slack.add_reaction(ts, REACTION_REPLY_CLARIFY)
+                continue
+            if len(company_ids) > 1:
+                print(
+                    f"[decks] reply {ts}: thread names "
+                    f"{len(company_ids)} companies — ambiguous, skipping"
+                )
+                slack.post_thread_reply(
+                    thread_ts,
+                    f"📎 Got a deck here, but this thread covers "
+                    f"{len(company_ids)} companies so I can't tell which one "
+                    "it belongs to. Add it on the company in Attio directly.",
+                )
+                slack.add_reaction(ts, REACTION_REPLY_CLARIFY)
+                continue
+
+            company_id = next(iter(company_ids))
+            if _apply_deck_reply(slack, attio, reply, company_id):
+                slack.add_reaction(ts, REACTION_REPLY_APPLIED)
+                applied += 1
+            else:
+                slack.add_reaction(ts, REACTION_REPLY_SKIPPED)
+        except Exception as e:
+            print(f"[decks] reply {ts} failed: {e}")
+            traceback.print_exc()
+            try:
+                slack.add_reaction(ts, REACTION_REPLY_ERROR)
+            except Exception:
+                pass
+    return applied
+
+
+def _apply_deck_reply(
+    slack: SlackClient, attio: AttioClient, reply: dict, company_id: str
+) -> bool:
+    """Upload the reply's files to the company and record a deck link on the
+    company's Inbound / Pipeline entries. True if anything was written."""
+    attachments = _collect_message_files(slack, reply)
+    uploaded = _upload_attachments_to_company(attio, company_id, attachments)
+
+    link = _deck_link_in(reply.get("text") or "")
+    if not link and attachments:
+        # No link given, but the file is now on the record — the reply
+        # permalink is at least a working route back to the original.
+        link = slack.permalink(reply["ts"])
+
+    updated = _record_deck_link(attio, company_id, link) if link else 0
+
+    if not uploaded and not updated:
+        print(
+            f"[decks] reply {reply['ts']}: nothing new for company "
+            f"{company_id} (already filed)"
+        )
+        return False
+
+    parts = []
+    if uploaded:
+        parts.append(f"filed {uploaded} file(s)")
+    if updated:
+        parts.append(f"set Pitchdeck on {updated} entry/entries")
+    print(f"[decks] reply {reply['ts']}: {', '.join(parts)} for {company_id}")
+    return True
+
+
+def _record_deck_link(attio: AttioClient, company_id: str, link: str) -> int:
+    """Write `link` to the newest Inbound Deals entry and, if the deal has
+    already been promoted, the newest Deal Pipeline entry too. Returns how
+    many entries were updated.
+
+    Promote only sets Pitch Deck when it creates the Pipeline entry, so a
+    deck arriving after promotion would otherwise never reach the list
+    Laetizia actually works in.
+    """
+    updated = 0
+    for list_id, slug in (
+        (INBOUND_DEALS_LIST_ID, "pitchdeck"),
+        (DEAL_PIPELINE_LIST_ID, "pitch_deck"),
+    ):
+        entry = _newest_entry_for_company(attio, list_id, company_id)
+        if not entry:
+            continue
+        current = AttioClient.entry_text_value(entry, slug)
+        if not _should_overwrite(current, link):
+            continue
+        entry_id = AttioClient.entry_id(entry)
+        if not entry_id:
+            continue
+        try:
+            attio.update_list_entry(list_id, entry_id, {slug: link})
+            updated += 1
+        except Exception as e:
+            print(f"[decks] failed setting {slug} on {entry_id}: {e}")
+    return updated
+
+
+def _should_overwrite(current: str | None, new: str) -> bool:
+    """Only fill a blank field, or replace a Slack permalink with a real
+    deck link. Never clobber a link someone entered by hand."""
+    if not current:
+        return True
+    if current.strip() == new.strip():
+        return False
+    if "slack.com" in current.lower() and "slack.com" not in new.lower():
+        return True
+    return False
+
+
+def _newest_entry_for_company(
+    attio: AttioClient, list_id: str, company_id: str
+) -> dict | None:
+    entries = attio.find_list_entries_for_company(list_id, company_id)
+    if not entries:
+        return None
+    return max(
+        entries,
+        key=lambda e: AttioClient.entry_created_at(e) or _EPOCH,
+    )
+
+
+def _company_ids_from_bot_replies(messages: list[dict]) -> set[str]:
+    """Every distinct Attio company the bot named in this thread."""
+    out: set[str] = set()
+    for m in messages:
+        if not SlackClient.is_from_bot(m):
+            continue
+        out.update(_RECORD_URL_RE.findall(m.get("text") or ""))
+    return out
+
+
+def _deck_link_in(text: str) -> str | None:
+    """First URL in the text that sits on a known deck host."""
+    if not text:
+        return None
+    urls = _SLACK_LINK_RE.findall(text) or _BARE_URL_RE.findall(text)
+    for url in urls:
+        cleaned = url.rstrip(").,;")
+        lowered = cleaned.lower()
+        if any(h in lowered for h in DECK_LINK_HOSTS):
+            return cleaned
+    return None
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -6,6 +6,7 @@ A Slack bot that processes deal messages from `#deal-intake` and stages them in 
 
 - **Ingest (every 5 min):** polls the Slack channel, parses new deal messages with an LLM (via OpenRouter), checks scope (Angel/Pre-seed/Seed only), fuzzy-matches against existing Attio companies, and either skips, flags as duplicate, or stages in the **Inbound Deals** list. Uses Slack reactions (✅ ⏭️ 🔁 🤷 ⚠️) to track processed state — no database needed.
 - **Pitchdecks:** any file attached to a deal message is uploaded to the company record's **Files** tab in Attio (via `POST /v2/files/upload`, multipart — undocumented but it's what the UI's drag-and-drop uses). PDFs are additionally passed to the LLM so the deck's contents inform extraction. A deck *link* in the message (DocSend, Drive, Notion, ...) goes into the Inbound Deals **Pitchdeck** field; when a file was filed but no link was given, the Slack permalink goes there instead. On promote, a filled **Pitchdeck** carries over to the Deal Pipeline **Pitch Deck** field. Files are only filed when the message contains exactly one deal — on a multi-deal list there's no way to tell which company a file belongs to.
+- **Deck replies (every 5 min, right after ingest):** a deck that arrives as a *thread reply* — you replying with the PDF later, or the founder sending it on — gets filed against the company the thread's root message resolved to. The company is recovered from the Attio URL in the bot's own earlier reply, so no state is stored. Threads are considered for 30 days back, but only ones with a reply in the last 4 hours are opened. Skipped when the thread covers more than one company.
 - **Promote (daily 17:00 Europe/Copenhagen):** moves any Inbound Deals entries marked `Add to pipeline` into the main **Deal Pipeline** list and flips their step to `Added`.
 
 ## Setup
@@ -41,10 +42,11 @@ Do NOT enable cron until these seven steps pass via `workflow_dispatch`:
 
 ```
 .github/workflows/
-  ingest.yml        # every 5 min
+  ingest.yml        # every 5 min (ingest.py + deck_replies.py)
   promote.yml       # daily 17:00 Europe/Copenhagen
 scripts/
   ingest.py         # ingest entry point
+  deck_replies.py   # decks arriving as thread replies
   promote.py        # promote entry point
   extractor.py      # LLM prompt (OpenRouter) + JSON parsing
   attio_client.py   # Attio API wrapper
@@ -70,6 +72,8 @@ requirements.txt
 |---|---|
 | 📎 | File(s) filed on the company record's Files tab in Attio |
 | 🔗 | A deck link was captured into the Pitchdeck field |
+
+On a **thread reply** carrying a deck, the reply itself gets ✅ when the deck was filed, ⏭️ when there was nothing new to file, ❓ when the thread has no staged deal or covers several companies, and ⚠️ on error.
 
 ## Notes
 
