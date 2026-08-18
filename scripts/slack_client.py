@@ -104,7 +104,13 @@ class SlackClient:
         """Download a file from a Slack `url_private_download` (or
         `url_private`) URL using the bot token for authentication.
         Returns raw bytes, or None on error. Caller is responsible for
-        knowing what mime-type to expect."""
+        knowing what mime-type to expect.
+
+        When the bot token lacks the `files:read` scope Slack does NOT
+        return 403 — it serves an HTML sign-in page with HTTP 200. A
+        status-only check passes that HTML through as if it were the
+        file, so we check the content type as well.
+        """
         if not url:
             return None
         token = self._client.token or ""
@@ -121,6 +127,15 @@ class SlackClient:
         if resp.status_code >= 400:
             print(
                 f"[slack] file download HTTP {resp.status_code} for {url}"
+            )
+            return None
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if content_type.startswith("text/html"):
+            print(
+                f"[slack] file download for {url} returned an HTML page, "
+                "not the file — the bot token is almost certainly missing "
+                "the `files:read` scope (add it under Bot Token Scopes and "
+                "reinstall the app)"
             )
             return None
         return resp.content

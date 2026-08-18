@@ -148,7 +148,20 @@ def _process_message(
         documents = _download_message_documents(slack, msg)
         had_attachment = bool(documents)
 
-        deals = extract_deals(text, client=llm_client, documents=documents)
+        try:
+            deals = extract_deals(text, client=llm_client, documents=documents)
+        except Exception as e:
+            # A broken attachment must not cost us the deal — without
+            # this, one unreadable PDF drops the whole message on the
+            # floor instead of just losing the deck.
+            if not documents:
+                raise
+            print(
+                f"[ingest] extraction with {len(documents)} document(s) "
+                f"failed ({_short_error(e)}) — retrying on message text only"
+            )
+            had_attachment = False
+            deals = extract_deals(text, client=llm_client)
 
         # Drop items the LLM explicitly marked as not-a-deal (defensive —
         # the prompt asks for an empty array on chatter, but old shapes
@@ -837,6 +850,17 @@ def _download_message_documents(
         data = slack.download_file(url)
         if not data:
             print(f"[ingest] failed to download attachment {name!r}")
+            continue
+        # Slack can hand back a sign-in page (HTTP 200, text/html) instead
+        # of the file when the token is under-scoped. download_file catches
+        # the common case by content type, but check the PDF magic number
+        # too — base64-ing HTML into a `file` block makes the LLM call fail
+        # with a confusing "The PDF specified was not valid".
+        if not data.startswith(b"%PDF"):
+            print(
+                f"[ingest] attachment {name!r} downloaded but is not a PDF "
+                f"(first bytes: {data[:16]!r}, {len(data)} bytes) — skipping"
+            )
             continue
         # OpenRouter's per-request body size cap is generous; we'll let
         # the API reject anything too big rather than guess thresholds.

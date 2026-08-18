@@ -14,6 +14,8 @@ A Slack bot that processes deal messages from `#deal-intake` and stages them in 
    - `chat:write`
    - `reactions:read`
    - `reactions:write`
+   - `files:read` — required to download pitchdecks. Without it Slack
+     returns an HTML sign-in page (HTTP 200) instead of the file.
 
 2. **GitHub secrets** (Settings → Secrets and variables → Actions):
    - `SLACK_BOT_TOKEN` — `xoxb-...`
