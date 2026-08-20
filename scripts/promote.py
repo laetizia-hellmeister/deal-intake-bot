@@ -650,6 +650,14 @@ def _extract_actor_refs(v) -> list[dict]:
       [{"actor": {"type": "...", "id": "..."}}, ...]
     We re-emit them in the write-shape Attio expects when creating the
     Pipeline entry.
+
+    Only workspace-member actors survive. When an Inbound entry has no
+    Deal Lead / Sourcer of its own, Attio reports the field as being held
+    by whichever actor created the entry — for bot-created entries that's
+    `api-token`. Copying that through makes the Pipeline create fail with
+    "An invalid value was passed to attribute with slug \"deal_lead\"",
+    which loses the whole promotion. Dropping it leaves the field empty on
+    the new entry instead, which is what it should have been.
     """
     if not v:
         return []
@@ -665,13 +673,20 @@ def _extract_actor_refs(v) -> list[dict]:
             inner = item.get("actor") or {}
             actor_type = inner.get("type")
             actor_id = inner.get("id")
-        if actor_id:
-            out.append(
-                {
-                    "referenced_actor_type": actor_type or "workspace-member",
-                    "referenced_actor_id": actor_id,
-                }
+        if not actor_id:
+            continue
+        if actor_type and actor_type != "workspace-member":
+            print(
+                f"[promote] dropping {actor_type} actor {actor_id} — only "
+                "workspace members are valid on Pipeline actor attributes"
             )
+            continue
+        out.append(
+            {
+                "referenced_actor_type": "workspace-member",
+                "referenced_actor_id": actor_id,
+            }
+        )
     return out
 
 
