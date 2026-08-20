@@ -55,6 +55,34 @@ class SlackClient:
         )
         return resp.get("messages", []) or []
 
+    def fetch_messages_since(
+        self, oldest_ts: int, max_messages: int
+    ) -> list[dict]:
+        """Return up to `max_messages` channel messages newer than
+        `oldest_ts` (a Unix second), following cursors across pages.
+
+        Separate from fetch_recent_messages because that one is a single
+        capped page — fine for ingest's 4-hour window, not for the
+        multi-week sweep the deck-reply pass needs.
+        """
+        out: list[dict] = []
+        cursor: str | None = None
+        while len(out) < max_messages:
+            kwargs: dict[str, Any] = {
+                "channel": self.channel_id,
+                "oldest": str(int(oldest_ts)),
+                "limit": min(200, max_messages - len(out)),
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+            resp = self._client.conversations_history(**kwargs)
+            page = resp.get("messages", []) or []
+            out.extend(page)
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+            if not cursor or not page:
+                break
+        return out
+
     # -- filtering ---------------------------------------------------------
 
     @staticmethod
@@ -104,7 +132,13 @@ class SlackClient:
         """Download a file from a Slack `url_private_download` (or
         `url_private`) URL using the bot token for authentication.
         Returns raw bytes, or None on error. Caller is responsible for
-        knowing what mime-type to expect."""
+        knowing what mime-type to expect.
+
+        When the bot token lacks the `files:read` scope Slack does NOT
+        return 403 — it serves an HTML sign-in page with HTTP 200. A
+        status-only check passes that HTML through as if it were the
+        file, so we check the content type as well.
+        """
         if not url:
             return None
         token = self._client.token or ""
@@ -121,6 +155,15 @@ class SlackClient:
         if resp.status_code >= 400:
             print(
                 f"[slack] file download HTTP {resp.status_code} for {url}"
+            )
+            return None
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if content_type.startswith("text/html"):
+            print(
+                f"[slack] file download for {url} returned an HTML page, "
+                "not the file — the bot token is almost certainly missing "
+                "the `files:read` scope (add it under Bot Token Scopes and "
+                "reinstall the app)"
             )
             return None
         return resp.content

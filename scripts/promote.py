@@ -221,6 +221,9 @@ def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
       source     (record-reference on Pipeline) — looked up from the
         Inbound source text body via fuzzy match against People then
         Companies. Skipped if no high-confidence match.
+      pitch_deck (text) — the Inbound `pitchdeck` link, carried over
+        verbatim. Omitted when Inbound has nothing in it, so promoting
+        never blanks a Pitch Deck that was filled in by hand.
       upcoming_round / upcoming_round_size_eum — kept for completeness,
         not currently populated on Inbound.
     """
@@ -257,6 +260,12 @@ def _pipeline_entry_values(entry: dict, attio: AttioClient) -> dict:
         source_refs = _match_source_records(attio, body, channel)
         if source_refs:
             values["source"] = source_refs
+
+    # Pitchdeck link -> Pipeline "Pitch Deck". Both are plain single-value
+    # text attributes, so the value carries over as-is.
+    pitchdeck = _extract_text(inbound_values.get("pitchdeck"))
+    if pitchdeck:
+        values["pitch_deck"] = pitchdeck
 
     # upcoming_round — only include valid in-scope values
     upcoming_round = _extract_select(inbound_values.get("upcoming_round"))
