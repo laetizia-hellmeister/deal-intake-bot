@@ -139,6 +139,19 @@ Rules:
   Leave empty when the @-mentions apply to the whole message
   uniformly ("deals for @pranav: Acme, Beta, …") — the bot picks
   up message-level mentions automatically. Default: empty list.
+
+Examples:
+- Bare founder LinkedIn profile: "https://www.linkedin.com/in/nikolaiensslen/"
+  → Extract as a deal with company_name=null, founders=[{name: inferred or null,
+    linkedin: "https://www.linkedin.com/in/nikolaiensslen/"}], is_deal=true.
+  Try to infer the founder's real name from the URL slug if possible
+  (camelCase, lastname-firstname patterns); if unclear, leave name as null.
+- Multiple founders on separate lines, each with a LinkedIn profile
+  → Extract each as a separate stealth deal.
+- Founder and company on same line: "Alice https://linkedin.com/in/alice/ at Acme Inc"
+  → Extract as one deal: company_name="Acme Inc", founders=[{name: "Alice",
+    linkedin: "https://linkedin.com/in/alice/"}].
+
 - Return only the JSON object, nothing else.
 """
 
