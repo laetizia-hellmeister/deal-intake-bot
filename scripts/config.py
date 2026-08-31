@@ -175,7 +175,7 @@ OPENROUTER_MODEL = "openai/gpt-5-mini"
 # 1-2 hours late even on public repos under load). Already-processed
 # messages are filtered out by their bot reactions, so revisiting them
 # is cheap.
-INGEST_LOOKBACK_SECONDS = 14400      # 4 hours
+INGEST_LOOKBACK_SECONDS = 86400      # 24 hours
 INGEST_MESSAGE_LIMIT = 50
 
 # --- Deck replies (pitchdecks posted as a thread reply) ---

@@ -81,6 +81,14 @@ def main() -> int:
         and not SlackClient.is_thread_reply(m)
         and not SlackClient.has_processed_reaction(m)
     ]
+
+    # DEBUG: log why each message was filtered
+    for i, m in enumerate(messages):
+        is_bot = SlackClient.is_from_bot(m)
+        is_reply = SlackClient.is_thread_reply(m)
+        has_reaction = SlackClient.has_processed_reaction(m)
+        if is_bot or is_reply or has_reaction:
+            print(f"[debug] Message {i} ts={m.get('ts')} filtered: bot={is_bot}, reply={is_reply}, reaction={has_reaction}, user={m.get('user')}, thread_ts={m.get('thread_ts')}, reactions={m.get('reactions')}")
     skipped_already = sum(
         1
         for m in messages
