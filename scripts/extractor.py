@@ -142,15 +142,20 @@ Rules:
 
 Examples:
 - Bare founder LinkedIn profile: "https://www.linkedin.com/in/nikolaiensslen/"
-  → Extract as a deal with company_name=null, founders=[{name: inferred or null,
-    linkedin: "https://www.linkedin.com/in/nikolaiensslen/"}], is_deal=true.
-  Try to infer the founder's real name from the URL slug if possible
-  (camelCase, lastname-firstname patterns); if unclear, leave name as null.
+  → Extract as a deal with company_name=null, is_deal=true, and
+    founders=[{name: "Nicolai Ensslen", linkedin: "https://www.linkedin.com/in/nikolaiensslen/"}]
+  The ingest logic will later convert this to company_name="Stealth (Nicolai Ensslen)".
+  Infer the founder's real name from the URL slug by parsing camelCase, hyphens,
+  and %XX URL encodings. Examples:
+    - "nikolaiensslen" → "Nikolai Ensslen"
+    - "john-smith" → "John Smith"
+    - "alice-o-rourke" → "Alice O Rourke"
+    - "tom-s%C3%BChr" → "Tom Sühr" (decode %C3%BChr as ü)
 - Multiple founders on separate lines, each with a LinkedIn profile
   → Extract each as a separate stealth deal.
 - Founder and company on same line: "Alice https://linkedin.com/in/alice/ at Acme Inc"
-  → Extract as one deal: company_name="Acme Inc", founders=[{name: "Alice",
-    linkedin: "https://linkedin.com/in/alice/"}].
+  → Extract as one deal with company_name="Acme Inc",
+    founders=[{name: "Alice", linkedin: "https://linkedin.com/in/alice/"}].
 
 - Return only the JSON object, nothing else.
 """
