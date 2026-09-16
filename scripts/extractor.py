@@ -60,6 +60,8 @@ Rules:
   "preseed" / "pre seed" / "pre-seed round" -> "Pre-seed"
   "seed round" / "seed stage" -> "Seed"
   "series a" -> "Series A"
+  "raising" or "they are raising" (without a specific round) -> "Unknown"
+    (do NOT infer a later stage from "raising" alone; the round is not specified)
 - domain = root domain only (strip protocol, www., path, query). Set to null
   if the only URL is a personal LinkedIn (linkedin.com/in/...) — that's not
   a company website.
@@ -112,13 +114,15 @@ Rules:
   directive that these deals should bypass triage and go straight to
   the main Deal Pipeline (skipping the usual "New → manual review"
   step). The user is signaling they've already reached out / decided
-  to engage. Look for explicit phrases like:
+  to engage. Look for explicit phrases or similar signals like:
     "add to pipeline"
     "directly to pipeline" / "direct to pipeline"
     "skip triage"
-    "already reached out"
+    "already reached out" / "already set up call" / "already in talks" /
+      "already called" / "already contacted" / "call set"
     "promote this/these"
     "#promote" / "[promote]"
+    "cold inbound - already" (pattern: "already [action]" signals engagement)
   Only set true when the phrase is clearly a DIRECTIVE about adding
   these deals — not when discussing pipeline mechanics in passing
   ("the founder wants to add us to their pipeline" -> false).

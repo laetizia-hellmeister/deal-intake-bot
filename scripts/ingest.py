@@ -28,6 +28,7 @@ import httpx
 from attio_client import AttioClient, AttioError
 from config import (
     DATABASE_SOURCING_CHANNEL,
+    DEAL_PIPELINE_LIST_ID,
     INBOUND_DEALS_LIST_ID,
     INGEST_LOOKBACK_SECONDS,
     INGEST_MESSAGE_LIMIT,
