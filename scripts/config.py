@@ -130,6 +130,7 @@ COLLEAGUE_FIRST_NAMES = (
     "Adrian",
     "Rasmus",
     "Nicole",
+    "Ellen",
 )
 
 # The sourcing_channel option for deals surfaced through a sourcing
@@ -294,6 +295,7 @@ SLACK_USER_TO_ATTIO_MEMBER = {
     "U1K6Y4U59":   "a81dd787-7863-4946-affb-a1ca9b708eb6",  # Adrian Locher
     "U1K8DJ4MD":   "4c651318-ffd6-4fd1-b1fe-8cd6ebb7db20",  # Rasmus Rothe
     "U0AT4FU0U8P": "a7c78bf9-ef9e-4a16-94dc-e446af0aca5e",  # Nicole Büttner
+    "U0C1681PL9G": "c1aa4da4-e944-4ffc-9ff2-c50b2f826003",  # Ellen Salpietro
 }
 
 # Inverse lookup — used by the daily digest to @-tag the deal lead in Slack.
